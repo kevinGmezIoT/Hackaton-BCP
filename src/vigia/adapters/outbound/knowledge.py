@@ -6,6 +6,7 @@ import json
 import math
 import re
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 from vigia.domain.contracts import IncidentPrecedent, RunbookMatch
@@ -58,11 +59,24 @@ class LocalKnowledgeAdapter:
         self,
         description: str,
         k: int = 3,
+        cutoff_at: datetime | None = None,
     ) -> list[IncidentPrecedent]:
         if not self._incidents_path.exists():
             return []
         raw = json.loads(self._incidents_path.read_text(encoding="utf-8"))
-        items = raw.get("incidents", []) if isinstance(raw, dict) else raw
+        raw_items = raw.get("incidents", []) if isinstance(raw, dict) else raw
+        if not raw_items:
+            return []
+
+        items = []
+        for it in raw_items:
+            occ_raw = it.get("occurred_at") or it.get("timestamp")
+            if cutoff_at is not None and occ_raw:
+                occ_dt = datetime.fromisoformat(str(occ_raw))
+                if occ_dt > cutoff_at:
+                    continue
+            items.append(it)
+
         if not items:
             return []
 
@@ -84,6 +98,8 @@ class LocalKnowledgeAdapter:
         for item, score in ranked[:k]:
             if score <= 0.0:
                 continue
+            occ_raw = item.get("occurred_at") or item.get("timestamp")
+            occ_dt = datetime.fromisoformat(str(occ_raw)) if occ_raw else None
             results.append(
                 IncidentPrecedent(
                     incident_id=item["id"],
@@ -92,6 +108,7 @@ class LocalKnowledgeAdapter:
                     root_cause=item["root_cause"],
                     resolution=item["resolution"],
                     source=self._incidents_path.name,
+                    occurred_at=occ_dt,
                 )
             )
         return results
@@ -149,4 +166,3 @@ class LocalKnowledgeAdapter:
             steps=steps,
             source=path.name,
         )
-

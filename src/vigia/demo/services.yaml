@@ -4,6 +4,7 @@ services:
       - Transferencias
       - transferencias-api
       - transfers
+    environment: production
     repository: applications/transferencias
     release_source: fixtures/transfers/releases.json
     architecture:
@@ -12,13 +13,31 @@ services:
     telemetry:
       service_selector: transferencias-api
       environment_selector: production
+      metric_unit: ms
+      version_label: cohort
+      impact_metric: latency_p95_ms
+      baseline_ms: 180.0
     threshold_ms: 800.0
     owner_team: transfers-squad
+    approver_group: transfers-approvers
+    runbooks_path: runbooks
+    config_version: v2-pilot
+    allowed_actions:
+      - create_preventive_ticket
+      - notify_team
+      - scale_capacity
+    recovery_criteria:
+      healthy_band_max_ms: 220.0
+      min_request_volume: 50
+      min_coverage: 0.8
+      consecutive_healthy_windows: 1
+      error_rate_tolerance: 0.01
 
   - service: pagos-core
     aliases:
       - pagos_core
       - payments-core
+    environment: production
     repository: applications/pagos-core
     release_source: fixtures/transfers/releases.json
     architecture:
@@ -27,6 +46,23 @@ services:
     telemetry:
       service_selector: pagos-core-api
       environment_selector: production
+      metric_unit: ms
+      version_label: cohort
+      impact_metric: latency_p95_ms
+      baseline_ms: 120.0
     threshold_ms: 500.0
     owner_team: core-payments-squad
-
+    approver_group: oncall-approvers
+    runbooks_path: runbooks
+    config_version: v2-pilot
+    allowed_actions:
+      - create_preventive_ticket
+      - notify_team
+      - scale_capacity
+      - rollback_change
+    recovery_criteria:
+      healthy_band_max_ms: 180.0
+      min_request_volume: 50
+      min_coverage: 0.8
+      consecutive_healthy_windows: 1
+      error_rate_tolerance: 0.01

@@ -1,0 +1,14 @@
+<mxfile host="app.diagrams.net" version="24.0.0">
+  <diagram id="account-statement" name="Consulta de estado de cuenta">
+    <mxGraphModel>
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <!-- No dependencies have been confirmed for this pilot. -->
+        <mxCell id="account-statement-service" value="consulta_estado_cuenta" vertex="1" parent="1">
+          <mxGeometry x="80" y="120" width="220" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

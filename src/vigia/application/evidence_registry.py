@@ -17,6 +17,11 @@ class EvidenceRegistry:
     def __init__(self, case: CaseRecord) -> None:
         self._case = case
 
+    def _current_revision_number(self) -> int:
+        if self._case.revisions:
+            return self._case.revisions[-1].revision_number
+        return 1
+
     def record(
         self,
         *,
@@ -28,9 +33,19 @@ class EvidenceRegistry:
         observed_fact: str,
         revision: str | None = None,
         window: str | None = None,
+        observation_type: str = "general",
+        cohort: str | None = None,
+        error_definition: str | None = None,
+        comparison_result: str | None = None,
+        revision_number: int | None = None,
     ) -> Evidence:
         """Append a new citable evidence item and return it."""
         evidence_id = f"EV-{len(self._case.evidence) + 1:03d}"
+        rev_num = (
+            revision_number
+            if revision_number is not None
+            else self._current_revision_number()
+        )
         item = Evidence(
             evidence_id=evidence_id,
             case_id=self._case.case_id,
@@ -42,8 +57,19 @@ class EvidenceRegistry:
             observed_fact=observed_fact,
             revision=revision,
             window=window,
+            observation_type=observation_type,
+            cohort=cohort,
+            error_definition=error_definition,
+            comparison_result=comparison_result,
+            revision_number=rev_num,
         )
         self._case.evidence.append(item)
+        if self._case.revisions:
+            for rev in reversed(self._case.revisions):
+                if rev.revision_number == rev_num:
+                    if evidence_id not in rev.evidence_ids:
+                        rev.evidence_ids.append(evidence_id)
+                    break
         return item
 
     def record_gap(self, gap: str) -> None:
@@ -72,4 +98,3 @@ class EvidenceRegistry:
         """Return Evidence objects matching the given IDs, preserving order."""
         by_id = {item.evidence_id: item for item in self._case.evidence}
         return [by_id[eid] for eid in evidence_ids if eid in by_id]
-

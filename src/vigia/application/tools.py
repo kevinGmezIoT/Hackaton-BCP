@@ -13,23 +13,30 @@ from pydantic import BaseModel, Field
 from vigia.application.approval_service import (
     ApprovalService,
     InactiveReleaseError,
+    InsufficientRollbackEvidenceError,
     ProposalConflictError,
 )
+from vigia.application.cohort_comparison import compare_service_cohort_rates
 from vigia.application.evidence_registry import EvidenceRegistry, InvalidCitationError
 from vigia.domain.contracts import (
     ActionType,
     AuditRecord,
     CaseEvent,
     CaseRecord,
+    CohortComparisonResult,
+    ComparisonVerdict,
     ConnectorStatus,
     EventType,
     Finding,
+    OperationalMode,
+    ProposalStatus,
     Release,
     RiskLevel,
 )
 from vigia.domain.ports import (
     ArchitecturePort,
     AuditSinkPort,
+    CaseStorePort,
     CodeRepositoryPort,
     KnowledgePort,
     ReleaseSourcePort,
@@ -46,6 +53,7 @@ TOOL_ROLE_MAP: dict[str, str] = {
     "compare_revisions": "Changes",
     "read_snippet": "Code",
     "search_logs": "Diagnosis",
+    "compare_cohort_error_rates": "Diagnosis",
     "search_similar_incidents": "Diagnosis",
     "search_runbook": "Diagnosis",
     "propose_action": "Recommendation",
@@ -111,6 +119,14 @@ class SearchLogsInput(BaseModel):
         default=None,
         description="Optional release/version cohort filter if available.",
     )
+    window_start: str | None = Field(
+        default=None,
+        description="Optional ISO-8601 window start for pre/post deployment comparisons (must be <= cutoff).",
+    )
+    window_end: str | None = Field(
+        default=None,
+        description="Optional ISO-8601 window end for pre/post deployment comparisons (clamped to <= cutoff).",
+    )
 
 
 class ListChangesInput(BaseModel):
@@ -125,6 +141,24 @@ class SearchIncidentsInput(BaseModel):
 
 class SearchRunbookInput(BaseModel):
     query: str = Field(description="Keywords describing the failure pattern or error.")
+
+
+class CompareCohortErrorRatesInput(BaseModel):
+    service: str = Field(description="Service name or alias to compare cohort error rates for.")
+    pattern: str = Field(
+        default="*",
+        description="Error pattern or '*' for all ERROR logs.",
+    )
+    window_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=240,
+        description="Optional equal pre/post window duration in minutes; defaults to deployment age up to cutoff.",
+    )
+    check_shared_saturation: bool = Field(
+        default=True,
+        description="Check shared resource saturation and request volume doubling.",
+    )
 
 
 class ProposeActionInput(BaseModel):
@@ -176,6 +210,7 @@ class CaseDependencies:
     knowledge: KnowledgePort
     approvals: ApprovalService
     audit: AuditSinkPort
+    case_store: CaseStorePort | None = None
 
 
 class CaseToolKit:
@@ -187,13 +222,19 @@ class CaseToolKit:
         deps: CaseDependencies,
         *,
         max_tool_calls: int = 18,
+        read_only: bool = False,
+        cutoff_override: datetime | None = None,
     ) -> None:
         self._case = case
         self._deps = deps
         self._registry = EvidenceRegistry(case)
         self._max_tool_calls = max_tool_calls
+        self._read_only = read_only
+        self._cutoff_override = cutoff_override
         self.tool_call_count = 0
         self.paused_for_approval = False
+        self.last_comparison: CohortComparisonResult | None = None
+        self.recorded_evidence_ids: list[str] = []
 
     def _canonical_service(self, service_or_alias: str) -> str:
         return self._deps.catalog.resolve_canonical_name(service_or_alias)
@@ -201,12 +242,19 @@ class CaseToolKit:
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
 
+    def _current_cutoff(self) -> datetime:
+        if self._cutoff_override is not None:
+            return self._cutoff_override
+        if self._case.revisions:
+            return self._case.revisions[-1].cutoff_at
+        return self._case.alert.effective_cutoff
+
     def _check_budget(self, tool_name: str) -> str | None:
         if self.paused_for_approval and tool_name != "propose_action":
             return json.dumps(
                 {
                     "status": "paused_for_approval",
-                    "note": "Case is paused awaiting human approval. Summarize findings now.",
+                    "note": "Case is paused awaiting human review or approval. Summarize findings now.",
                 }
             )
         if self.tool_call_count >= self._max_tool_calls:
@@ -224,7 +272,7 @@ class CaseToolKit:
 
     def _active_releases_for_repo(self, repository: str) -> list[Release]:
         env = self._case.alert.environment
-        cutoff = self._case.alert.effective_cutoff
+        cutoff = self._current_cutoff()
         active: list[Release] = []
         for svc in self._deps.catalog.list_services():
             if svc.repository != repository:
@@ -249,6 +297,37 @@ class CaseToolKit:
                 return "deployed_target_unmatched_base", rel.release_id
         return "undeployed_candidate", None
 
+    def _classify_log_vs_deploy(
+        self,
+        *,
+        service: str,
+        env: str,
+        cutoff: datetime,
+        effective_start: datetime,
+        effective_end: datetime,
+        total: int,
+        first_occurrence: datetime | None,
+    ) -> tuple[str | None, str | None]:
+        """Compare error log timing against the active deployment timestamp."""
+        res = self._deps.releases.resolve_active_releases(service, env, cutoff)
+        if res.status != ConnectorStatus.OK or not res.releases:
+            return None, None
+        latest_rel = res.releases[0]
+        deployed_at = latest_rel.deployed_at
+        if total == 0:
+            if effective_end <= deployed_at:
+                return "pre_deploy_clean", latest_rel.release_id
+            return "no_errors_observed", latest_rel.release_id
+        if (first_occurrence is not None and first_occurrence < deployed_at) or (
+            effective_end <= deployed_at
+        ):
+            return "pre_deploy_errors_detected", latest_rel.release_id
+        if effective_start >= deployed_at or (
+            first_occurrence is not None and first_occurrence >= deployed_at
+        ):
+            return "post_deploy_errors_only", latest_rel.release_id
+        return None, latest_rel.release_id
+
     def _audit_and_emit(
         self,
         *,
@@ -262,18 +341,17 @@ class CaseToolKit:
     ) -> None:
         timestamp = self._now()
         role = TOOL_ROLE_MAP.get(tool_name, "Investigation")
-        self._deps.audit.record_audit(
-            AuditRecord(
-                case_id=self._case.case_id,
-                timestamp=timestamp,
-                actor="investigator_agent",
-                action_or_tool=tool_name,
-                sanitized_args=sanitized_args,
-                status=status,
-                summary=summary,
-                references=references,
-            )
+        audit_rec = AuditRecord(
+            case_id=self._case.case_id,
+            timestamp=timestamp,
+            actor="investigator_agent",
+            action_or_tool=tool_name,
+            sanitized_args=sanitized_args,
+            status=status,
+            summary=summary,
+            references=references,
         )
+        self._deps.audit.record_audit(audit_rec)
         event = CaseEvent(
             event_type=event_type,
             case_id=self._case.case_id,
@@ -283,9 +361,19 @@ class CaseToolKit:
             tool_name=tool_name,
             sanitized_args=sanitized_args,
             references=references,
-            payload=payload or {},
+            payload={"status": status, **(payload or {})},
         )
         self._case.events.append(event)
+        self._case.updated_at = timestamp
+        for ref in references:
+            if ref.startswith("EV-") and ref not in self.recorded_evidence_ids:
+                self.recorded_evidence_ids.append(ref)
+        if not self._read_only and self._deps.case_store is not None:
+            self._deps.case_store.save_case(
+                self._case,
+                audit_records=[audit_rec],
+            )
+            event = self._case.events[-1]
         self._deps.audit.emit_event(event)
 
     def resolve_release(self, service: str, environment: str | None = None) -> str:
@@ -293,7 +381,7 @@ class CaseToolKit:
             return blocked
         canonical = self._canonical_service(service)
         env = environment or self._case.alert.environment
-        cutoff = self._case.alert.effective_cutoff
+        cutoff = self._current_cutoff()
         result = self._deps.releases.resolve_active_releases(canonical, env, cutoff)
 
         evidence_ids: list[str] = []
@@ -311,6 +399,8 @@ class CaseToolKit:
                         f"status={rel.status}, cohort={rel.cohort}): {rel.summary}"
                     ),
                     revision=rel.deployed_sha,
+                    observation_type="release",
+                    cohort=rel.cohort,
                 )
                 evidence_ids.append(ev.evidence_id)
             summary = (
@@ -325,6 +415,11 @@ class CaseToolKit:
         self._audit_and_emit(
             tool_name="resolve_release",
             sanitized_args={"service": canonical, "environment": env},
+            payload={"despliegues": [
+                {"id": r.release_id, "hora": r.deployed_at.strftime("%H:%M:%S"),
+                 "desplegado_en": r.deployed_at.isoformat()}
+                for r in result.releases
+            ]},
             status=result.status.value,
             summary=summary,
             references=evidence_ids,
@@ -345,7 +440,7 @@ class CaseToolKit:
             return blocked
         canonical = self._canonical_service(service)
         env = self._case.alert.environment
-        cutoff = self._case.alert.effective_cutoff
+        cutoff = self._current_cutoff()
         result = self._deps.releases.list_recent_changes(canonical, env, hours, cutoff)
 
         evidence_ids: list[str] = []
@@ -362,6 +457,8 @@ class CaseToolKit:
                 ),
                 revision=rel.deployed_sha,
                 window=f"last_{hours}h_until_{cutoff.isoformat()}",
+                observation_type="change_log",
+                cohort=rel.cohort,
             )
             evidence_ids.append(ev.evidence_id)
 
@@ -374,6 +471,12 @@ class CaseToolKit:
         self._audit_and_emit(
             tool_name="list_changes",
             sanitized_args={"service": canonical, "hours": hours},
+            payload={"despliegues": [
+                {"id": r.release_id, "hora": r.deployed_at.strftime("%H:%M:%S"),
+                 "desplegado_en": r.deployed_at.isoformat(),
+                 "servicio": r.service, "descripcion": r.summary}
+                for r in sorted(result.releases, key=lambda item: item.deployed_at, reverse=True)
+            ]},
             status=result.status.value,
             summary=summary,
             references=evidence_ids,
@@ -397,6 +500,7 @@ class CaseToolKit:
     ) -> str:
         if blocked := self._check_budget("compare_revisions"):
             return blocked
+        cutoff = self._current_cutoff()
         deployment_status, release_id = self._classify_repo_revision(
             repository, target_sha, base_sha=base_sha
         )
@@ -417,7 +521,7 @@ class CaseToolKit:
                 ev = self._registry.record(
                     service=repository,
                     environment=env,
-                    observed_at=self._case.alert.effective_cutoff,
+                    observed_at=cutoff,
                     source="git_diff" if deployment_status != "undeployed_candidate" else "git_diff_undeployed",
                     reproducible_reference=f"{repository}:{base_sha}..{target_sha}:{file_diff.path}",
                     observed_fact=(
@@ -425,6 +529,8 @@ class CaseToolKit:
                         f"truncated={file_diff.truncated}:\n{file_diff.patch}"
                     ),
                     revision=target_sha,
+                    observation_type="code_diff",
+                    comparison_result=deployment_status,
                 )
                 evidence_ids.append(ev.evidence_id)
             summary = (
@@ -472,6 +578,7 @@ class CaseToolKit:
     ) -> str:
         if blocked := self._check_budget("read_snippet"):
             return blocked
+        cutoff = self._current_cutoff()
         deployment_status, release_id = self._classify_repo_revision(repository, sha)
         result = self._deps.code_repo.read_snippet(repository, sha, path, start_line, end_line)
         evidence_ids: list[str] = []
@@ -489,7 +596,7 @@ class CaseToolKit:
             ev = self._registry.record(
                 service=repository,
                 environment=env,
-                observed_at=self._case.alert.effective_cutoff,
+                observed_at=cutoff,
                 source="git_show" if deployment_status != "undeployed_candidate" else "git_show_undeployed",
                 reproducible_reference=(
                     f"{repository}@{result.sha}:{result.path}#L{result.start_line}-L{result.end_line}"
@@ -498,6 +605,8 @@ class CaseToolKit:
                     f"{prefix}Lines {result.start_line}-{result.end_line} of {result.path} at {result.sha}"
                 ),
                 revision=result.sha,
+                observation_type="code_snippet",
+                comparison_result=deployment_status,
             )
             evidence_ids.append(ev.evidence_id)
             summary = (
@@ -542,6 +651,7 @@ class CaseToolKit:
             return blocked
         canonical = self._canonical_service(service)
         env = self._case.alert.environment
+        cutoff = self._current_cutoff()
         result = self._deps.architecture.query_dependencies(canonical, env, version, direction)
         evidence_ids: list[str] = []
         if result.status == ConnectorStatus.OK and result.relations:
@@ -549,7 +659,7 @@ class CaseToolKit:
                 ev = self._registry.record(
                     service=canonical,
                     environment=env,
-                    observed_at=self._case.alert.effective_cutoff,
+                    observed_at=cutoff,
                     source=rel.source_kind,
                     reproducible_reference=rel.reference,
                     observed_fact=(
@@ -558,6 +668,7 @@ class CaseToolKit:
                         f"ambiguous={rel.ambiguous})"
                     ),
                     revision=rel.revision,
+                    observation_type="architecture",
                 )
                 evidence_ids.append(ev.evidence_id)
                 if rel.ambiguous:
@@ -597,7 +708,7 @@ class CaseToolKit:
             return blocked
         canonical = self._canonical_service(service)
         env = self._case.alert.environment
-        cutoff = self._case.alert.effective_cutoff
+        cutoff = self._current_cutoff()
         result = self._deps.telemetry.query_metrics(
             canonical, env, metric, window_minutes, cutoff, allow_post_action=False
         )
@@ -611,12 +722,18 @@ class CaseToolKit:
                 reproducible_reference=result.reproducible_query,
                 observed_fact=(
                     f"{metric} current={result.current_value} {result.unit}, "
-                    f"15m_ago={result.value_15m_ago} {result.unit}, points={len(result.points)}"
+                    f"15m_ago={result.value_15m_ago} {result.unit}, points={len(result.points)}, "
+                    f"volume={result.request_volume if result.request_volume is not None else 'unknown'}, "
+                    f"coverage={result.coverage:.2f}"
                 ),
                 window=f"{result.window_start.isoformat()}..{result.window_end.isoformat()}",
+                observation_type="metrics",
             )
             evidence_ids.append(ev.evidence_id)
-            summary = f"{canonical} {metric}: current={result.current_value} {result.unit} (15m ago: {result.value_15m_ago})"
+            summary = (
+                f"{canonical} {metric}: current={result.current_value} {result.unit} "
+                f"(15m ago: {result.value_15m_ago}, coverage={result.coverage:.2f})"
+            )
         else:
             gap = f"metrics ({canonical}/{metric}): {result.status.value} - {result.note}"
             self._registry.record_gap(gap)
@@ -624,6 +741,9 @@ class CaseToolKit:
 
         self._audit_and_emit(
             tool_name="query_metrics",
+            payload={"actual": result.current_value, "hace_15_min": result.value_15m_ago,
+                     "unidad": result.unit,
+                     "puntos": [[p.timestamp.strftime("%H:%M:%S"), p.value] for p in result.points]},
             sanitized_args={
                 "service": canonical,
                 "metric": metric,
@@ -638,6 +758,7 @@ class CaseToolKit:
                 "status": result.status.value,
                 "evidence_ids": evidence_ids,
                 "coverage": result.coverage,
+                "request_volume": result.request_volume,
                 "metrics": result.model_dump(mode="json"),
             }
         )
@@ -647,7 +768,7 @@ class CaseToolKit:
             return blocked
         canonical = self._canonical_service(service)
         env = self._case.alert.environment
-        cutoff = self._case.alert.effective_cutoff
+        cutoff = self._current_cutoff()
         result = self._deps.telemetry.detect_anomaly(canonical, env, metric, cutoff)
         evidence_ids: list[str] = []
         if result.status == ConnectorStatus.OK:
@@ -660,14 +781,17 @@ class CaseToolKit:
                 observed_fact=(
                     f"Anomaly={result.is_anomalous}, z_score={result.z_score:.2f}, "
                     f"current={result.current_value}, threshold={result.threshold}, "
+                    f"projection_status={result.projection_status}, "
                     f"projected_minutes_to_threshold={result.projected_minutes_to_threshold}"
                 ),
                 window=f"{result.window_start.isoformat()}..{result.window_end.isoformat()}",
+                observation_type="anomaly",
+                comparison_result=result.projection_status,
             )
             evidence_ids.append(ev.evidence_id)
             summary = (
                 f"Anomaly={result.is_anomalous} (z={result.z_score:.2f}, "
-                f"projected_crossing={result.projected_minutes_to_threshold} min)"
+                f"projection={result.projection_status}:{result.projected_minutes_to_threshold} min)"
             )
         else:
             gap = f"anomaly ({canonical}/{metric}): {result.status.value} - {result.note}"
@@ -677,6 +801,8 @@ class CaseToolKit:
         self._audit_and_emit(
             tool_name="detect_anomaly",
             sanitized_args={"service": canonical, "metric": metric},
+            payload={"anomalia": result.is_anomalous, "minutos_para_cruce": result.projected_minutes_to_threshold,
+                     "z": result.z_score, "umbral": result.threshold, "actual": result.current_value},
             status=result.status.value,
             summary=summary,
             references=evidence_ids,
@@ -685,6 +811,7 @@ class CaseToolKit:
             {
                 "status": result.status.value,
                 "evidence_ids": evidence_ids,
+                "projection_status": result.projection_status,
                 "anomaly": result.model_dump(mode="json"),
             }
         )
@@ -695,16 +822,45 @@ class CaseToolKit:
         pattern: str,
         window_minutes: int = 30,
         cohort: str | None = None,
+        window_start: str | None = None,
+        window_end: str | None = None,
     ) -> str:
         if blocked := self._check_budget("search_logs"):
             return blocked
         canonical = self._canonical_service(service)
         env = self._case.alert.environment
-        cutoff = self._case.alert.effective_cutoff
+        cutoff = self._current_cutoff()
+
+        try:
+            parsed_start = datetime.fromisoformat(window_start) if window_start else None
+            parsed_end = datetime.fromisoformat(window_end) if window_end else None
+        except ValueError as exc:
+            return json.dumps({"status": "validation_error", "error": f"Invalid ISO window: {exc}"})
+
+        if parsed_end is not None and parsed_end > cutoff:
+            parsed_end = cutoff
+
         result = self._deps.telemetry.search_logs(
-            canonical, env, pattern, window_minutes, cutoff, cohort
+            canonical,
+            env,
+            pattern,
+            window_minutes,
+            cutoff,
+            cohort,
+            window_start=parsed_start,
+            window_end=parsed_end,
         )
         evidence_ids: list[str] = []
+        comparison_result, active_release_id = self._classify_log_vs_deploy(
+            service=canonical,
+            env=env,
+            cutoff=cutoff,
+            effective_start=result.window_start,
+            effective_end=result.window_end,
+            total=result.total,
+            first_occurrence=result.first_occurrence,
+        )
+
         if result.status in {ConnectorStatus.OK, ConnectorStatus.NO_RESULTS}:
             first_str = result.first_occurrence.isoformat() if result.first_occurrence else "none"
             ev = self._registry.record(
@@ -715,12 +871,25 @@ class CaseToolKit:
                 reproducible_reference=result.reproducible_query,
                 observed_fact=(
                     f"Pattern '{pattern}' matched {result.total} log(s) "
-                    f"(first_occurrence={first_str}, cohorts={result.cohort_counts})"
+                    f"(first_occurrence={first_str}, cohorts={result.cohort_counts}, "
+                    f"requests={result.cohort_requests}, rates={result.cohort_error_rates}, "
+                    f"uncovered={result.uncovered_cohorts})"
                 ),
+                revision=active_release_id,
                 window=f"{result.window_start.isoformat()}..{result.window_end.isoformat()}",
+                observation_type="logs",
+                cohort=cohort,
+                comparison_result=comparison_result,
             )
             evidence_ids.append(ev.evidence_id)
-            summary = f"Logs '{pattern}' on {canonical}: {result.total} matches (first={first_str})"
+            if result.uncovered_cohorts:
+                self._registry.record_gap(
+                    f"logs ({canonical}): zero-request uncovered cohort(s) {result.uncovered_cohorts}"
+                )
+            summary = (
+                f"Logs '{pattern}' on {canonical}: {result.total} matches "
+                f"(first={first_str}, rates={result.cohort_error_rates})"
+            )
         else:
             gap = f"logs ({canonical}): {result.status.value} - {result.note}"
             self._registry.record_gap(gap)
@@ -728,11 +897,18 @@ class CaseToolKit:
 
         self._audit_and_emit(
             tool_name="search_logs",
+            payload={"total": result.total, "primera_ocurrencia_iso": (
+                result.first_occurrence.isoformat() if result.first_occurrence else None
+            ), "primera_ocurrencia": (
+                result.first_occurrence.strftime("%H:%M:%S") if result.first_occurrence else None
+            )},
             sanitized_args={
                 "service": canonical,
                 "pattern": pattern,
                 "window_minutes": window_minutes,
                 "cohort": cohort,
+                "window_start": window_start,
+                "window_end": window_end,
             },
             status=result.status.value,
             summary=summary,
@@ -743,26 +919,117 @@ class CaseToolKit:
                 "status": result.status.value,
                 "evidence_ids": evidence_ids,
                 "coverage": result.coverage,
+                "comparison_result": comparison_result,
                 "logs": result.model_dump(mode="json"),
+            }
+        )
+
+    def compare_cohort_error_rates(
+        self,
+        service: str,
+        pattern: str = "*",
+        window_minutes: int | None = None,
+        check_shared_saturation: bool = True,
+    ) -> str:
+        """Compare pre/post-deployment error rates per cohort up to the active cutoff."""
+        if blocked := self._check_budget("compare_cohort_error_rates"):
+            return blocked
+        canonical = self._canonical_service(service)
+        env = self._case.alert.environment
+        cutoff = self._current_cutoff()
+        svc_cfg = self._deps.catalog.get_service(canonical)
+
+        comparison = compare_service_cohort_rates(
+            service=canonical,
+            environment=env,
+            cutoff_at=cutoff,
+            telemetry=self._deps.telemetry,
+            releases=self._deps.releases,
+            service_config=svc_cfg,
+            pattern=pattern,
+            window_minutes=window_minutes,
+            check_shared_saturation=check_shared_saturation,
+        )
+        self.last_comparison = comparison
+        window_str = (
+            f"{comparison.pre_window_start.isoformat()}..{comparison.post_window_end.isoformat()}"
+        )
+        queries = sorted({w.reproducible_query for w in comparison.windows if w.reproducible_query})
+        reproducible_ref = " | ".join(queries) if queries else f"{canonical}/{env}"
+        cohort_summaries = [
+            (
+                f"{w.label}:{w.cohort}={w.errors}/{w.requests if w.requests is not None else '?'}"
+                f"({f'{w.error_rate * 100:.2f}%' if w.error_rate is not None else 'indeterminada'})"
+            )
+            for w in comparison.windows
+        ]
+        ev = self._registry.record(
+            service=canonical,
+            environment=env,
+            observed_at=cutoff,
+            source="cohort_comparison",
+            reproducible_reference=reproducible_ref,
+            observed_fact=(
+                f"{comparison.summary} Windows=[{'; '.join(cohort_summaries)}] "
+                f"pre_vol={comparison.pre_total_requests} post_vol={comparison.post_total_requests} "
+                f"saturated={comparison.shared_resource_saturated} verdict={comparison.verdict.value}"
+            ),
+            revision=comparison.release_id,
+            window=window_str,
+            observation_type="cohort_comparison",
+            cohort=",".join(sorted({w.cohort for w in comparison.windows if w.cohort})) or None,
+            error_definition=comparison.error_definition,
+            comparison_result=comparison.verdict.value,
+        )
+        for missing in comparison.missing_data:
+            self._registry.record_gap(f"cohort_comparison ({canonical}): {missing}")
+
+        evidence_ids = [ev.evidence_id]
+        status = (
+            "indeterminate"
+            if comparison.verdict == ComparisonVerdict.INDETERMINATE
+            else "ok"
+        )
+        self._audit_and_emit(
+            tool_name="compare_cohort_error_rates",
+            sanitized_args={
+                "service": canonical,
+                "pattern": pattern,
+                "window_minutes": window_minutes,
+                "check_shared_saturation": check_shared_saturation,
+            },
+            status=status,
+            summary=comparison.summary,
+            references=evidence_ids,
+        )
+        return json.dumps(
+            {
+                "status": status,
+                "evidence_ids": evidence_ids,
+                "comparison": comparison.model_dump(mode="json"),
             }
         )
 
     def search_similar_incidents(self, description: str, k: int = 3) -> str:
         if blocked := self._check_budget("search_similar_incidents"):
             return blocked
-        matches = self._deps.knowledge.search_similar_incidents(description, k=k)
+        cutoff = self._current_cutoff()
+        matches = self._deps.knowledge.search_similar_incidents(
+            description, k=k, cutoff_at=cutoff
+        )
         evidence_ids: list[str] = []
         for inc in matches:
             ev = self._registry.record(
                 service=self._case.alert.service,
                 environment=self._case.alert.environment,
-                observed_at=self._case.alert.effective_cutoff,
+                observed_at=cutoff,
                 source="incident_history",
                 reproducible_reference=f"{inc.source}#{inc.incident_id}",
                 observed_fact=(
                     f"{inc.incident_id} (sim={inc.similarity:.2f}): "
                     f"root_cause={inc.root_cause}; resolution={inc.resolution}"
                 ),
+                observation_type="incident_history",
             )
             evidence_ids.append(ev.evidence_id)
 
@@ -785,19 +1052,21 @@ class CaseToolKit:
     def search_runbook(self, query: str) -> str:
         if blocked := self._check_budget("search_runbook"):
             return blocked
+        cutoff = self._current_cutoff()
         matches = self._deps.knowledge.search_runbook(query)
         evidence_ids: list[str] = []
         for rb in matches:
             ev = self._registry.record(
                 service=self._case.alert.service,
                 environment=self._case.alert.environment,
-                observed_at=self._case.alert.effective_cutoff,
+                observed_at=cutoff,
                 source="runbooks",
                 reproducible_reference=f"{rb.source}#{rb.runbook_id}",
                 observed_fact=(
                     f"{rb.runbook_id} ({rb.title}): conditions={rb.applicable_conditions}; "
                     f"steps={'; '.join(rb.steps[:3])}"
                 ),
+                observation_type="runbook",
             )
             evidence_ids.append(ev.evidence_id)
 
@@ -831,6 +1100,13 @@ class CaseToolKit:
         exposed_services: list[str] | None = None,
         inferred_claims: list[str] | None = None,
     ) -> str:
+        if self._read_only:
+            return json.dumps(
+                {
+                    "status": "read_only_mode",
+                    "error": "Follow-up investigation is strictly read-only; return candidate findings to backend.",
+                }
+            )
         if blocked := self._check_budget("propose_action"):
             return blocked
         canonical_target = self._canonical_service(target_service)
@@ -855,7 +1131,11 @@ class CaseToolKit:
                 verification_plan=verification_plan,
                 now=self._now(),
             )
-        except (InvalidCitationError, InactiveReleaseError) as exc:
+        except (
+            InvalidCitationError,
+            InactiveReleaseError,
+            InsufficientRollbackEvidenceError,
+        ) as exc:
             self._audit_and_emit(
                 tool_name="propose_action",
                 sanitized_args={
@@ -889,7 +1169,8 @@ class CaseToolKit:
                 }
             )
 
-        if proposal.risk_level != RiskLevel.LOW:
+        is_shadow = self._case.mode == OperationalMode.SHADOW
+        if is_shadow or proposal.risk_level != RiskLevel.LOW:
             self.paused_for_approval = True
 
         if was_duplicate:
@@ -898,7 +1179,7 @@ class CaseToolKit:
                     "status": "already_registered",
                     "proposal_id": proposal.proposal_id,
                     "risk_level": proposal.risk_level.value,
-                    "note": "Equivalent proposal was already registered for this case.",
+                    "note": "Equivalent proposal was already registered for this case revision.",
                 }
             )
 
@@ -913,7 +1194,8 @@ class CaseToolKit:
             status=proposal.status.value,
             summary=(
                 f"Proposed {proposal.action.value} on {proposal.target_service} "
-                f"(release={proposal.target_release_id}, risk={proposal.risk_level.value})"
+                f"(release={proposal.target_release_id}, risk={proposal.risk_level.value}, "
+                f"mode={self._case.mode.value})"
             ),
             references=proposal.evidence_ids,
             event_type=EventType.PROPOSAL,
@@ -921,8 +1203,24 @@ class CaseToolKit:
                 "proposal_id": proposal.proposal_id,
                 "risk_level": proposal.risk_level.value,
                 "action": proposal.action.value,
+                "mode": self._case.mode.value,
+                "status": proposal.status.value,
+                "proposal_version": proposal.version,
+                "justificacion": proposal.justification,
             },
         )
+        if is_shadow:
+            return json.dumps(
+                {
+                    "status": ProposalStatus.RECOMMENDED.value,
+                    "proposal_id": proposal.proposal_id,
+                    "risk_level": proposal.risk_level.value,
+                    "note": (
+                        "Shadow mode recommendation persisted for human review. "
+                        "No external system was modified; provide the final report now."
+                    ),
+                }
+            )
         return json.dumps(
             {
                 "status": "awaiting_approval"
@@ -941,7 +1239,7 @@ class CaseToolKit:
 
     def build_langchain_tools(self) -> list[StructuredTool]:
         """Return LangChain StructuredTool instances bound to this case toolkit."""
-        return [
+        tools = [
             StructuredTool.from_function(
                 func=self.query_metrics,
                 name="query_metrics",
@@ -987,8 +1285,20 @@ class CaseToolKit:
             StructuredTool.from_function(
                 func=self.search_logs,
                 name="search_logs",
-                description="Count and sample redacted log errors for a service up to cutoff.",
+                description=(
+                    "Count and sample redacted log errors and per-cohort error rates "
+                    "using relative lookback or explicit pre/post-deploy window_start/window_end <= cutoff."
+                ),
                 args_schema=SearchLogsInput,
+            ),
+            StructuredTool.from_function(
+                func=self.compare_cohort_error_rates,
+                name="compare_cohort_error_rates",
+                description=(
+                    "Compare code-computed pre/post-deployment error rates across stable and new "
+                    "cohorts with denominators, coverage, and shared resource saturation checks."
+                ),
+                args_schema=CompareCohortErrorRatesInput,
             ),
             StructuredTool.from_function(
                 func=self.search_similar_incidents,
@@ -1002,14 +1312,17 @@ class CaseToolKit:
                 description="Search operational runbooks for applicable mitigation procedures.",
                 args_schema=SearchRunbookInput,
             ),
-            StructuredTool.from_function(
-                func=self.propose_action,
-                name="propose_action",
-                description=(
-                    "Register a single evidence-backed preventive action proposal. "
-                    "Medium/high risk actions pause for human approval."
-                ),
-                args_schema=ProposeActionInput,
-            ),
         ]
-
+        if not self._read_only:
+            tools.append(
+                StructuredTool.from_function(
+                    func=self.propose_action,
+                    name="propose_action",
+                    description=(
+                        "Register a single evidence-backed preventive action recommendation or proposal. "
+                        "Shadow mode saves it for human review; assisted medium/high risk pauses for approval."
+                    ),
+                    args_schema=ProposeActionInput,
+                )
+            )
+        return tools

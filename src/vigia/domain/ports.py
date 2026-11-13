@@ -7,16 +7,26 @@ from typing import Protocol
 
 from vigia.domain.contracts import (
     ActionProposal,
+    AlertEnvelope,
+    AlertIngestionResult,
     AnomalyReport,
     AuditRecord,
     CaseEvent,
+    CaseRecord,
     CodeDiff,
     CodeSnippet,
+    ConversationTurn,
+    DecisionChoice,
     DependencyQueryResult,
     ExecutionResult,
+    ExternalOperationRecord,
+    FollowUpCandidate,
+    HumanDecision,
     IncidentPrecedent,
     LogQueryResult,
     MetricSeries,
+    OperationalMode,
+    PendingWorkItem,
     ReleaseResolution,
     RunbookMatch,
     ServiceConfig,
@@ -114,6 +124,8 @@ class TelemetryPort(Protocol):
         window_minutes: int,
         cutoff_at: datetime,
         cohort: str | None = None,
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
     ) -> LogQueryResult: ...
 
 
@@ -124,13 +136,14 @@ class KnowledgePort(Protocol):
         self,
         description: str,
         k: int = 3,
+        cutoff_at: datetime | None = None,
     ) -> list[IncidentPrecedent]: ...
 
     def search_runbook(self, query: str) -> list[RunbookMatch]: ...
 
 
 class ActionExecutorPort(Protocol):
-    """Executes approved or low-risk preventive actions."""
+    """Executes approved or low-risk preventive actions and queries pipeline operations."""
 
     def execute_action(self, proposal: ActionProposal) -> ExecutionResult: ...
 
@@ -142,6 +155,18 @@ class ActionExecutorPort(Protocol):
         reason: str,
     ) -> ExecutionResult: ...
 
+    def dispatch_operation(
+        self,
+        *,
+        case_id: str,
+        environment: str,
+        proposal: ActionProposal,
+        operation_key: str,
+        now: datetime | None = None,
+    ) -> ExternalOperationRecord: ...
+
+    def get_operation_status(self, operation_id: str) -> ExternalOperationRecord | None: ...
+
 
 class AuditSinkPort(Protocol):
     """Persists audit records and emits timeline events."""
@@ -152,3 +177,110 @@ class AuditSinkPort(Protocol):
 
     def list_audit_records(self, case_id: str | None = None) -> list[AuditRecord]: ...
 
+
+class CaseStorePort(Protocol):
+    """Transactional persistence for cases, episodes, events, reviews, and pending work."""
+
+    def ingest_alert_transactional(
+        self,
+        *,
+        envelope: AlertEnvelope,
+        canonical_service: str,
+        service_config_version: str,
+        mode: OperationalMode,
+        now: datetime,
+        re_evaluate_on_update: bool = True,
+    ) -> tuple[CaseRecord, AlertIngestionResult, PendingWorkItem | None]: ...
+
+    def save_case(
+        self,
+        case: CaseRecord,
+        *,
+        audit_records: list[AuditRecord] | None = None,
+        new_events: list[CaseEvent] | None = None,
+        pending_work: PendingWorkItem | None = None,
+        expected_version: int | None = None,
+    ) -> CaseRecord: ...
+
+    def get_case(self, case_id: str) -> CaseRecord | None: ...
+
+    def list_cases(self) -> list[CaseRecord]: ...
+
+    def list_events(self, case_id: str, after_sequence_id: int = 0) -> list[CaseEvent]: ...
+
+    def claim_next_work(
+        self,
+        case_id: str | None = None,
+        *,
+        worker_id: str = "default-worker",
+        lease_seconds: int = 120,
+        now: datetime | None = None,
+    ) -> PendingWorkItem | None: ...
+
+    def complete_work(
+        self,
+        work_id: str,
+        *,
+        last_step_index: int = 0,
+        status: str = "completed",
+        worker_id: str | None = None,
+    ) -> None: ...
+
+    def create_chat_turn_transactional(
+        self,
+        *,
+        case_id: str,
+        client_message_id: str,
+        actor: str,
+        question: str,
+        base_revision: int | None,
+        proposal_id: str | None,
+        intent: str,
+        re_evaluate: bool,
+        cutoff_at: datetime,
+        user_hypothesis: str | None,
+        now: datetime,
+        immediate_answer: str | None = None,
+        immediate_outcome: str | None = None,
+        immediate_evidence_ids: list[str] | None = None,
+    ) -> tuple[CaseRecord, ConversationTurn, PendingWorkItem | None, bool]: ...
+
+    def list_turns(self, case_id: str) -> list[ConversationTurn]: ...
+
+    def publish_follow_up_transactional(
+        self,
+        *,
+        case_id: str,
+        turn_id: str,
+        base_revision: int,
+        candidate: FollowUpCandidate,
+        updated_case_snapshot: CaseRecord,
+        now: datetime,
+    ) -> tuple[CaseRecord, ConversationTurn]: ...
+
+    def reserve_approval_transactional(
+        self,
+        *,
+        case_id: str,
+        proposal_id: str,
+        actor: str,
+        decision: DecisionChoice,
+        comment: str,
+        idempotency_key: str | None,
+        actor_groups: list[str] | None,
+        proposal_version: int | None,
+        now: datetime,
+        validate_fn: object,
+    ) -> tuple[CaseRecord, HumanDecision, ExecutionResult | None, str | None, bool]: ...
+
+    def finalize_operation_transactional(
+        self,
+        *,
+        case_id: str,
+        operation_key: str | None,
+        decision: HumanDecision,
+        execution: ExecutionResult,
+        operation: ExternalOperationRecord | None,
+        audit_record: AuditRecord,
+        event: CaseEvent,
+    ) -> CaseRecord: ...
