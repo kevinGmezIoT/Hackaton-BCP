@@ -55,7 +55,7 @@ uv run vigia --profile pilot --mode shadow --serve --port 8000
 Set your provider API key in the environment (for example `GOOGLE_API_KEY` or `OPENAI_API_KEY`) and pass a LangChain model identifier:
 
 ```powershell
-uv run vigia --model google_genai:gemini-2.5-flash --decision approve
+uv run vigia --model google_genai:gemini-3.5-flash --decision approve
 ```
 
 ## Building & Running the Distributable Wheel
