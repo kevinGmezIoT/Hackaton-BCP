@@ -407,9 +407,19 @@ class CaseService:
             raise CaseNotFoundError(f"Case '{case_id}' was not found.")
         return case
 
-    def list_cases(self) -> list[CaseRecord]:
-        """List all persisted investigation cases."""
-        return self._store.list_cases()
+    def list_cases(self, *, service: str | None = None) -> list[CaseRecord]:
+        """List persisted investigation cases, optionally filtered by service/alias."""
+        cases = self._store.list_cases()
+        if not service or not service.strip():
+            return cases
+        canonical = self._deps.catalog.resolve_canonical_name(service).lower()
+        raw = service.strip().lower()
+        return [
+            case
+            for case in cases
+            if self._deps.catalog.resolve_canonical_name(case.alert.service).lower() == canonical
+            or case.alert.service.strip().lower() == raw
+        ]
 
     def list_events(self, case_id: str, after_sequence_id: int = 0) -> list[CaseEvent]:
         """Return the ordered timeline events for a case after an optional sequence ID."""

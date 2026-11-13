@@ -35,6 +35,11 @@ class PilotRuntimeConfig:
     mode: OperationalMode = OperationalMode.SHADOW
     catalog_path: Path | None = None
     fixtures_dir: Path | None = None
+    metrics_path: Path | None = None
+    logs_path: Path | None = None
+    releases_path: Path | None = None
+    incidents_path: Path | None = None
+    runbooks_dir: Path | None = None
     authorized_repos: dict[str, Path] = field(default_factory=dict)
     db_path: Path | str = ":memory:"
     audit_path: Path | None = None
@@ -128,7 +133,19 @@ def build_pilot_case_service(
     model: str | BaseChatModel,
 ) -> tuple[CaseService, SimulationState, JsonlAuditSinkAdapter]:
     """Build a CaseService selecting Demo or Pilot adapters from PilotRuntimeConfig."""
-    if config.profile == RuntimeProfile.DEMO:
+    if config.profile == RuntimeProfile.DEMO and not any(
+        (
+            config.catalog_path,
+            config.metrics_path,
+            config.logs_path,
+            config.releases_path,
+            config.incidents_path,
+            config.runbooks_dir,
+            config.prometheus_url,
+            config.loki_url,
+            config.github_service_repos,
+        )
+    ):
         assert config.fixtures_dir is not None, "DEMO profile requires fixtures_dir."
         return build_case_service(
             fixtures_dir=config.fixtures_dir,
@@ -164,8 +181,8 @@ def build_pilot_case_service(
         )
     else:
         telemetry = CsvTelemetryAdapter(
-            base_dir / "metrics.csv",
-            base_dir / "logs.txt",
+            config.metrics_path or (base_dir / "metrics.csv"),
+            config.logs_path or (base_dir / "logs.txt"),
             catalog,
             simulation_state=state,
             unauthorized_services=config.unauthorized_services,
@@ -187,7 +204,7 @@ def build_pilot_case_service(
         )
     else:
         releases = JsonReleaseSourceAdapter(
-            base_dir / "releases.json",
+            config.releases_path or base_dir / "releases.json",
             rolled_back_release_ids=state.rolled_back_releases,
         )
         code_repo = LocalGitRepositoryAdapter(config.authorized_repos)
@@ -202,8 +219,8 @@ def build_pilot_case_service(
         diagram_revisions=config.diagram_revisions,
     )
     knowledge = LocalKnowledgeAdapter(
-        base_dir / "incidents.json",
-        base_dir / "runbooks",
+        config.incidents_path or base_dir / "incidents.json",
+        config.runbooks_dir or base_dir / "runbooks",
     )
     executor = SimulatedActionExecutor(state)
     approvals = ApprovalService(

@@ -790,3 +790,134 @@ def test_delivery_d_assisted_permissions_concurrency_timeout_and_sustained_verif
     assert closed.verification.recovered is True
     assert closed.verification.metric_value == 184.0
 
+
+def test_list_cases_endpoint_filters_by_service_status_permissions_and_runs_background_worker(
+    transfers_workspace: TransfersWorkspace,
+) -> None:
+    import time
+    from vigia.adapters.inbound.http_api import CaseWorkWorker
+    from vigia.entrypoints.cli import _OfflineDemoChatModel
+
+    cfg = PilotRuntimeConfig(
+        profile=RuntimeProfile.PILOT,
+        mode=OperationalMode.ASSISTED,
+        fixtures_dir=transfers_workspace.fixtures_dir,
+        authorized_repos={"applications/pagos-core": transfers_workspace.repo_dir},
+        db_path=transfers_workspace.root / "vigia-cases.db",
+        audit_path=transfers_workspace.root / "audit-cases.jsonl",
+        strict_rollback_validation=True,
+        clock=lambda: datetime.fromisoformat("2026-11-12T09:14:00-05:00"),
+    )
+    model = _OfflineDemoChatModel(
+        base_sha=transfers_workspace.base_sha,
+        deployed_sha=transfers_workspace.deployed_sha,
+    )
+    service, _, _ = build_pilot_case_service(cfg, model=model)
+    try:
+        worker = CaseWorkWorker(service, poll_interval_seconds=0.05)
+        app = VigiaHttpApp(
+            service,
+            require_user_auth=True,
+            auto_process_alerts=False,
+            on_work_enqueued=lambda _cid: worker.wake(),
+        )
+        worker.start()
+        try:
+            # 1. Unauthenticated GET /api/casos is rejected.
+            unauth = app.handle_request("GET", "/api/casos")
+            assert unauth.status_code == 401
+
+            # 2. Alert ingestion returns 202 immediately without blocking on investigation.
+            alert_payload = {
+                "source": "sim-monitor",
+                "event_id": "evt-list-1",
+                "episode_id": "ep-list-1",
+                "state": "firing",
+                "alert": {
+                    "service": "Transferencias",
+                    "environment": "production",
+                    "metric": "latency_p95_ms",
+                    "observed_at": "2026-11-12T09:12:00-05:00",
+                    "symptom": "p95 latency rose from 180 ms to 420 ms",
+                    "baseline_value": 180.0,
+                    "current_value": 420.0,
+                    "threshold_value": 800.0,
+                    "projected_minutes_to_threshold": 24.0,
+                },
+            }
+            ingest = app.handle_request("POST", "/api/alerta", body=json.dumps(alert_payload))
+            assert ingest.status_code == 202
+            case_id = ingest.json()["case_id"]
+
+            # 3. Background worker completes the investigation and populates GET /api/casos + GET /api/eventos.
+            lead_hdr = {
+                "Authorization": f"Bearer {app.issue_session_token('lead', ['transfers-squad'])}"
+            }
+            approver_hdr = {
+                "Authorization": f"Bearer {app.issue_session_token('approver', ['oncall-approvers'])}"
+            }
+            bob_hdr = {
+                "Authorization": f"Bearer {app.issue_session_token('bob', ['billing-squad'])}"
+            }
+
+            deadline = time.monotonic() + 5.0
+            discovered: dict[str, Any] | None = None
+            while time.monotonic() < deadline:
+                resp = app.handle_request(
+                    "GET",
+                    "/api/casos?servicio=transferencias",
+                    headers=lead_hdr,
+                )
+                assert resp.status_code == 200
+                body = resp.json()
+                if body["cases"] and body["cases"][0]["proposal"] is not None:
+                    discovered = body["cases"][0]
+                    break
+                time.sleep(0.05)
+
+            assert discovered is not None
+            assert discovered["case_id"] == case_id
+            assert discovered["probable_cause"]["target_service"] == "pagos-core"
+            assert discovered["proposal"]["action"] == "rollback_change"
+
+            # Unauthorized squad sees 0 cases for Transferencias.
+            bob_list = app.handle_request("GET", "/api/casos", headers=bob_hdr)
+            assert bob_list.status_code == 200
+            assert bob_list.json()["cases"] == []
+
+            # SSE events reflect executed tools and proposal.
+            ev_resp = app.handle_request("GET", f"/api/eventos?caso={case_id}", headers=lead_hdr)
+            assert ev_resp.status_code == 200
+            assert "event: step" in ev_resp.body
+            assert "event: proposal" in ev_resp.body
+
+            # Approving closes the case; GET /api/casos still returns recently closed cases and verification.
+            prop = discovered["proposal"]
+            dec = app.handle_request(
+                "POST",
+                "/api/aprobacion",
+                headers=approver_hdr,
+                body=json.dumps(
+                    {
+                        "case_id": case_id,
+                        "proposal_id": prop["proposal_id"],
+                        "proposal_version": prop["version"],
+                        "decision": "approve",
+                    }
+                ),
+            )
+            assert dec.status_code == 200
+            closed_list = app.handle_request(
+                "GET",
+                "/api/casos?estado=closed",
+                headers=lead_hdr,
+            )
+            assert closed_list.status_code == 200
+            assert len(closed_list.json()["cases"]) == 1
+            assert closed_list.json()["cases"][0]["verification"]["recovered"] is True
+            assert closed_list.json()["cases"][0]["verification"]["metric_value"] == 184.0
+        finally:
+            worker.stop()
+    finally:
+        service.close()
+

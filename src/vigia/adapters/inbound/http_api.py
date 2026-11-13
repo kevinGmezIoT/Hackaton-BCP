@@ -7,9 +7,11 @@ import hashlib
 import hmac
 import json
 import secrets
+import sys
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -209,6 +211,61 @@ def _case_to_console_dto(case: CaseRecord, service: CaseService) -> dict[str, An
         "external_operations": [op.model_dump(mode="json") for op in case.external_operations],
         "verification": case.verification.model_dump(mode="json") if case.verification else None,
         "final_summary": case.final_summary,
+    }
+
+
+def _case_summary_dto(case: CaseRecord, service: CaseService) -> dict[str, Any]:
+    """Format lightweight case summary for polling and incident discovery."""
+    svc_cfg = service._deps.catalog.get_service(case.alert.service)
+    finding = case.proposal.finding if case.proposal else case.partial_findings
+    return {
+        "case_id": case.case_id,
+        "episode_id": case.episode_id,
+        "version": case.version,
+        "mode": case.mode.value,
+        "status": case.status.value,
+        "service": case.alert.service,
+        "environment": case.alert.environment,
+        "cutoff_at": case.alert.effective_cutoff.isoformat(),
+        "created_at": case.created_at.isoformat(),
+        "updated_at": case.updated_at.isoformat(),
+        "symptom": {
+            "service": case.alert.service,
+            "metric": case.alert.metric,
+            "unit": svc_cfg.telemetry.metric_unit if svc_cfg else "ms",
+            "current_value": case.alert.current_value,
+            "baseline_value": case.alert.baseline_value,
+            "threshold_value": case.alert.threshold_value,
+            "projected_minutes_to_threshold": case.alert.projected_minutes_to_threshold,
+            "summary": case.alert.symptom,
+        },
+        "probable_cause": {
+            "target_service": case.proposal.target_service if case.proposal else None,
+            "target_release_id": case.proposal.target_release_id if case.proposal else None,
+            "hypothesis": finding.hypothesis if finding else None,
+        },
+        "proposal": (
+            {
+                "proposal_id": case.proposal.proposal_id,
+                "version": case.proposal.version,
+                "action": case.proposal.action.value,
+                "risk_level": case.proposal.risk_level.value,
+                "status": case.proposal.status.value,
+            }
+            if case.proposal is not None
+            else None
+        ),
+        "verification": (
+            {
+                "recovered": case.verification.recovered,
+                "case_status": case.verification.case_status.value,
+                "metric_value": case.verification.metric_value,
+            }
+            if case.verification is not None
+            else None
+        ),
+        "evidence_count": len(case.evidence),
+        "event_count": len(case.events),
     }
 
 
@@ -478,6 +535,7 @@ class VigiaHttpApp:
         session_secret: str | None = None,
         trusted_proxy_token: str | None = None,
         allow_demo_console_session: bool = False,
+        on_work_enqueued: Callable[[str], None] | None = None,
     ) -> None:
         self._service = service
         self._webhook_token = webhook_token
@@ -486,6 +544,11 @@ class VigiaHttpApp:
         self._session_secret = (session_secret or secrets.token_urlsafe(32)).encode("utf-8")
         self._trusted_proxy_token = trusted_proxy_token
         self._allow_demo_console_session = allow_demo_console_session
+        self._on_work_enqueued = on_work_enqueued
+
+    def set_work_enqueued_callback(self, callback: Callable[[str], None] | None) -> None:
+        """Register a callback notified whenever async case work is queued."""
+        self._on_work_enqueued = callback
 
     def issue_session_token(
         self,
@@ -657,12 +720,44 @@ class VigiaHttpApp:
                     results.append(res.model_dump(mode="json"))
                     if self._auto_process_alerts:
                         self._service.process_pending_work(res.case_id)
+                    elif self._on_work_enqueued is not None:
+                        self._on_work_enqueued(res.case_id)
             except UnknownServiceError as exc:
                 return self._json_response(422, {"error": str(exc)})
 
             if len(results) == 1:
                 return self._json_response(202, results[0])
             return self._json_response(202, {"ingested": len(results), "results": results})
+
+        if upper_method == "GET" and path == "/api/casos":
+            user, groups = self._extract_session_identity(hdrs)
+            if not user:
+                return self._json_response(401, {"error": "Corporate session identity required."})
+            service_filter = (qs.get("servicio") or qs.get("service") or [""])[0].strip() or None
+            status_filter = (qs.get("estado") or qs.get("status") or [""])[0].strip().lower() or None
+            raw_limit = (qs.get("limit") or ["50"])[0].strip()
+            try:
+                limit = max(1, min(200, int(raw_limit)))
+            except ValueError:
+                return self._json_response(400, {"error": "Invalid 'limit' parameter."})
+
+            visible = [
+                case
+                for case in self._service.list_cases(service=service_filter)
+                if self._can_read_case(case, groups)
+                and (status_filter is None or case.status.value.lower() == status_filter)
+            ]
+            visible.sort(
+                key=lambda c: (c.updated_at, c.created_at, c.case_id),
+                reverse=True,
+            )
+            return self._json_response(
+                200,
+                {
+                    "cases": [_case_summary_dto(c, self._service) for c in visible[:limit]],
+                    "total": len(visible),
+                },
+            )
 
         if upper_method == "GET" and path == "/api/caso":
             case_id = (qs.get("caso") or qs.get("case_id") or [""])[0].strip()
@@ -851,6 +946,8 @@ class VigiaHttpApp:
                                     ),
                                 }
                             )
+                    elif result.status == TurnStatus.PENDING and self._on_work_enqueued is not None:
+                        self._on_work_enqueued(case_id)
                     return self._json_response(202, result.model_dump(mode="json"))
 
         if upper_method == "GET" and path == "/api/servicio/prueba":
@@ -898,14 +995,75 @@ def create_http_server(
     return ThreadingHTTPServer((host, port), _Handler)
 
 
+class CaseWorkWorker:
+    """Background worker draining pending investigations and follow-ups from CaseService."""
+
+    def __init__(
+        self,
+        service: CaseService,
+        *,
+        poll_interval_seconds: float = 0.25,
+    ) -> None:
+        self._service = service
+        self._poll_interval = poll_interval_seconds
+        self._wake_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def wake(self) -> None:
+        """Signal the worker immediately when new work is enqueued."""
+        self._wake_event.set()
+
+    def start(self) -> None:
+        """Start the background worker thread."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="vigia-case-worker",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Request shutdown and wait briefly for the worker thread."""
+        self._stop_event.set()
+        self._wake_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            processed_any = False
+            try:
+                while not self._stop_event.is_set():
+                    processed = self._service.process_pending_work()
+                    if processed is None:
+                        break
+                    processed_any = True
+            except Exception as exc:
+                print(f"[vigia-worker] Error processing pending work: {exc}", file=sys.stderr)
+            if not processed_any:
+                self._wake_event.wait(timeout=self._poll_interval)
+                self._wake_event.clear()
+
+
 def serve_http(
     app: VigiaHttpApp,
     *,
     host: str = "127.0.0.1",
     port: int = 8000,
     ready_event: threading.Event | None = None,
+    start_worker: bool = True,
 ) -> None:
     """Run the Vigía HTTP server until interrupted."""
+    worker: CaseWorkWorker | None = None
+    if start_worker and not app._auto_process_alerts:
+        worker = CaseWorkWorker(app._service)
+        app.set_work_enqueued_callback(lambda _case_id: worker.wake())
+        worker.start()
+
     server = create_http_server(app, host=host, port=port)
     if ready_event is not None:
         ready_event.set()
@@ -913,4 +1071,6 @@ def serve_http(
         server.serve_forever()
     finally:
         server.server_close()
+        if worker is not None:
+            worker.stop()
 

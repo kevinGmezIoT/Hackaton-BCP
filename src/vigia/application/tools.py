@@ -361,7 +361,7 @@ class CaseToolKit:
             tool_name=tool_name,
             sanitized_args=sanitized_args,
             references=references,
-            payload=payload or {},
+            payload={"status": status, **(payload or {})},
         )
         self._case.events.append(event)
         self._case.updated_at = timestamp
@@ -415,6 +415,10 @@ class CaseToolKit:
         self._audit_and_emit(
             tool_name="resolve_release",
             sanitized_args={"service": canonical, "environment": env},
+            payload={"despliegues": [
+                {"id": r.release_id, "hora": r.deployed_at.strftime("%H:%M:%S")}
+                for r in result.releases
+            ]},
             status=result.status.value,
             summary=summary,
             references=evidence_ids,
@@ -466,6 +470,11 @@ class CaseToolKit:
         self._audit_and_emit(
             tool_name="list_changes",
             sanitized_args={"service": canonical, "hours": hours},
+            payload={"despliegues": [
+                {"id": r.release_id, "hora": r.deployed_at.strftime("%H:%M:%S"),
+                 "servicio": r.service, "descripcion": r.summary}
+                for r in sorted(result.releases, key=lambda item: item.deployed_at, reverse=True)
+            ]},
             status=result.status.value,
             summary=summary,
             references=evidence_ids,
@@ -730,6 +739,9 @@ class CaseToolKit:
 
         self._audit_and_emit(
             tool_name="query_metrics",
+            payload={"actual": result.current_value, "hace_15_min": result.value_15m_ago,
+                     "unidad": result.unit,
+                     "puntos": [[p.timestamp.strftime("%H:%M:%S"), p.value] for p in result.points]},
             sanitized_args={
                 "service": canonical,
                 "metric": metric,
@@ -787,6 +799,8 @@ class CaseToolKit:
         self._audit_and_emit(
             tool_name="detect_anomaly",
             sanitized_args={"service": canonical, "metric": metric},
+            payload={"anomalia": result.is_anomalous, "minutos_para_cruce": result.projected_minutes_to_threshold,
+                     "z": result.z_score, "umbral": result.threshold, "actual": result.current_value},
             status=result.status.value,
             summary=summary,
             references=evidence_ids,
@@ -881,6 +895,9 @@ class CaseToolKit:
 
         self._audit_and_emit(
             tool_name="search_logs",
+            payload={"total": result.total, "primera_ocurrencia": (
+                result.first_occurrence.strftime("%H:%M:%S") if result.first_occurrence else None
+            )},
             sanitized_args={
                 "service": canonical,
                 "pattern": pattern,
@@ -1184,6 +1201,8 @@ class CaseToolKit:
                 "action": proposal.action.value,
                 "mode": self._case.mode.value,
                 "status": proposal.status.value,
+                "proposal_version": proposal.version,
+                "justificacion": proposal.justification,
             },
         )
         if is_shadow:

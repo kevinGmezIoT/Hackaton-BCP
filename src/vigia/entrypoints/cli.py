@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from vigia.adapters.inbound.http_api import VigiaHttpApp, serve_http
+from vigia.adapters.outbound.ui_bridge import BridgeClient, BridgeRelay
 from vigia.application.cohort_comparison import infer_error_definition
 from vigia.demo import copy_demo_scenario
 from vigia.domain.contracts import (
@@ -151,6 +153,13 @@ class _OfflineDemoChatModel(BaseChatModel):
                 AIMessage(
                     content="",
                     tool_calls=[
+                        {"id": "call_timeline", "name": "list_changes",
+                         "args": {"service": "pagos-core", "hours": 3}}
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
                         {
                             "id": "call_9",
                             "name": "propose_action",
@@ -163,8 +172,8 @@ class _OfflineDemoChatModel(BaseChatModel):
                                     "(src/pool.py#L4-L8), causing pool exhaustion upstream in transferencias."
                                 ),
                                 "justification": (
-                                    "312 Connection pool exhausted errors started at 09:01 exclusively in cohort CHG-4821; "
-                                    "matches INC-3512, INC-3307 and RB-087."
+                                    "Desde las 09:01 se observaron 312 errores de conexiones agotadas "
+                                    "en CHG-4821. Coincide con INC-3512, INC-3307 y la guía RB-087."
                                 ),
                                 "evidence_ids": [
                                     "EV-001",
@@ -189,12 +198,10 @@ class _OfflineDemoChatModel(BaseChatModel):
                 ),
                 AIMessage(
                     content=(
-                        "**Symptom & Projected Impact**: Transferencias p95 latency rose from 180 ms to 420 ms "
-                        "(~24 min to 800 ms threshold) [EV-001].\n"
-                        "**Probable Cause & Dependency Path**: Transferencias calls pagos-core [EV-002]; "
-                        f"active release CHG-4821 ({self.deployed_sha[:8]}) reduced `pool_size` 80 -> 50 in "
-                        "`src/pool.py` [EV-003, EV-004, EV-005], producing 312 pool exhaustion errors since 09:01 [EV-006].\n"
-                        "**Proposed Action**: Rollback `CHG-4821` on `pagos-core`."
+                        "La latencia p95 de Transferencias subió de 180 a 420 ms [EV-001]. "
+                        f"CHG-4821 ({self.deployed_sha[:8]}) redujo las conexiones de pagos-core "
+                        "de 80 a 50 en src/pool.py [EV-003, EV-004, EV-005]. "
+                        "Se recomienda revertir el despliegue."
                     )
                 ),
             ]
@@ -369,6 +376,99 @@ def _load_dotenv(env_path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _parse_key_value_pairs(entries: list[str] | None, env_raw: str | None = None) -> dict[str, str]:
+    """Parse KEY=VALUE pairs from CLI flags and comma-separated environment values."""
+    parsed: dict[str, str] = {}
+    chunks: list[str] = []
+    if env_raw:
+        chunks.extend(part.strip() for part in env_raw.split(",") if part.strip())
+    if entries:
+        chunks.extend(part.strip() for part in entries if part.strip())
+    for item in chunks:
+        if "=" not in item:
+            raise ValueError(f"Expected KEY=VALUE mapping, got '{item}'.")
+        key, value = item.split("=", 1)
+        parsed[key.strip()] = value.strip()
+    return parsed
+
+
+def _build_runtime_config(
+    args: argparse.Namespace,
+    tmp_path: Path,
+    profile: RuntimeProfile,
+    mode: OperationalMode,
+) -> tuple[PilotRuntimeConfig, str, str]:
+    """Resolve demo bootstrap vs external workspace, telemetry, GitHub, and DB paths."""
+    github_repos = _parse_key_value_pairs(
+        args.github_repo,
+        os.environ.get("VIGIA_GITHUB_REPOS"),
+    )
+    local_repos_raw = _parse_key_value_pairs(
+        args.local_repo,
+        os.environ.get("VIGIA_LOCAL_REPOS"),
+    )
+    authorized_repos = {name: Path(repo_path) for name, repo_path in local_repos_raw.items()}
+
+    fixtures_arg = args.fixtures_dir or os.environ.get("VIGIA_FIXTURES_DIR")
+    catalog_arg = args.catalog or os.environ.get("VIGIA_CATALOG_PATH")
+    metrics_arg = args.metrics_path or os.environ.get("VIGIA_METRICS_PATH")
+    logs_arg = args.logs_path or os.environ.get("VIGIA_LOGS_PATH")
+    releases_arg = os.environ.get("VIGIA_RELEASES_PATH")
+    incidents_arg = os.environ.get("VIGIA_INCIDENTS_PATH")
+    runbooks_arg = os.environ.get("VIGIA_RUNBOOKS_DIR")
+    db_arg = args.db_path or os.environ.get("VIGIA_DB_PATH")
+    audit_arg = args.audit_path or os.environ.get("VIGIA_AUDIT_PATH")
+    prom_url = args.prometheus_url or os.environ.get("VIGIA_PROMETHEUS_URL")
+    loki_url = args.loki_url or os.environ.get("VIGIA_LOKI_URL")
+    github_api_url = args.github_api_url or os.environ.get("VIGIA_GITHUB_API_URL")
+    if github_repos and not github_api_url:
+        github_api_url = "https://api.github.com"
+
+    uses_external_workspace = any(
+        (
+            fixtures_arg,
+            catalog_arg,
+            metrics_arg,
+            logs_arg,
+            releases_arg,
+            incidents_arg,
+            runbooks_arg,
+            github_repos,
+            authorized_repos,
+            prom_url,
+            loki_url,
+        )
+    )
+    if uses_external_workspace:
+        fixtures_dir = Path(fixtures_arg) if fixtures_arg else Path(".")
+        base_sha = ""
+        deployed_sha = ""
+    else:
+        fixtures_dir, demo_repos, base_sha, deployed_sha = _bootstrap_demo_workspace(tmp_path)
+        authorized_repos = {**demo_repos, **authorized_repos}
+
+    cfg = PilotRuntimeConfig(
+        profile=profile,
+        mode=mode,
+        catalog_path=Path(catalog_arg) if catalog_arg else None,
+        fixtures_dir=fixtures_dir,
+        metrics_path=Path(metrics_arg) if metrics_arg else None,
+        logs_path=Path(logs_arg) if logs_arg else None,
+        releases_path=Path(releases_arg) if releases_arg else None,
+        incidents_path=Path(incidents_arg) if incidents_arg else None,
+        runbooks_dir=Path(runbooks_arg) if runbooks_arg else None,
+        authorized_repos=authorized_repos,
+        db_path=Path(db_arg) if db_arg else (tmp_path / "vigia.db"),
+        audit_path=Path(audit_arg) if audit_arg else (tmp_path / "audit.jsonl"),
+        prometheus_url=prom_url,
+        loki_url=loki_url,
+        github_api_url=github_api_url,
+        github_service_repos=github_repos,
+        strict_rollback_validation=(profile == RuntimeProfile.PILOT),
+    )
+    return cfg, base_sha, deployed_sha
+
+
 def main(argv: list[str] | None = None) -> int:
     _load_dotenv(Path.cwd() / ".env")
     parser = argparse.ArgumentParser(description="Vigía Investigator CLI & Pilot Server")
@@ -396,6 +496,63 @@ def main(argv: list[str] | None = None) -> int:
         help="Operational mode (defaults to assisted in demo, shadow in pilot).",
     )
     parser.add_argument(
+        "--fixtures-dir",
+        default=None,
+        help="Directory containing services.yaml, metrics, logs, and architecture diagrams (or VIGIA_FIXTURES_DIR).",
+    )
+    parser.add_argument(
+        "--catalog",
+        default=None,
+        help="Explicit path to services.yaml (or VIGIA_CATALOG_PATH).",
+    )
+    parser.add_argument(
+        "--metrics-path",
+        default=None,
+        help="Path to CSV metrics file (.csv or .txt) (or VIGIA_METRICS_PATH).",
+    )
+    parser.add_argument(
+        "--logs-path",
+        default=None,
+        help="Path to JSON-lines logs file (or VIGIA_LOGS_PATH).",
+    )
+    parser.add_argument(
+        "--db-path",
+        default=None,
+        help="Persistent SQLite database path (or VIGIA_DB_PATH).",
+    )
+    parser.add_argument(
+        "--audit-path",
+        default=None,
+        help="Persistent JSONL audit log path (or VIGIA_AUDIT_PATH).",
+    )
+    parser.add_argument(
+        "--prometheus-url",
+        default=None,
+        help="Prometheus HTTP base URL (or VIGIA_PROMETHEUS_URL).",
+    )
+    parser.add_argument(
+        "--loki-url",
+        default=None,
+        help="Loki HTTP base URL (or VIGIA_LOKI_URL).",
+    )
+    parser.add_argument(
+        "--github-api-url",
+        default=None,
+        help="GitHub REST API base URL (defaults to https://api.github.com when --github-repo is used).",
+    )
+    parser.add_argument(
+        "--github-repo",
+        action="append",
+        default=None,
+        help="Repeatable service=owner/repo mapping for GitHub (or VIGIA_GITHUB_REPOS).",
+    )
+    parser.add_argument(
+        "--local-repo",
+        action="append",
+        default=None,
+        help="Repeatable repo_id=local_path mapping for LocalGit (or VIGIA_LOCAL_REPOS).",
+    )
+    parser.add_argument(
         "--demo-offline",
         action="store_true",
         help="Run the Transfers -> pagos-core scenario using a deterministic offline scripted model.",
@@ -410,8 +567,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Start the HTTP/SSE Pilot API & Console server.",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="HTTP server host.")
-    parser.add_argument("--port", type=int, default=8000, help="HTTP server port.")
+    parser.add_argument("--host", default=os.environ.get("VIGIA_HOST", "127.0.0.1"), help="HTTP server host.")
+    parser.add_argument("--port", type=int, default=os.environ.get("VIGIA_PORT", "8000"), help="HTTP server port.")
+    parser.add_argument("--bridge-url", default=os.environ.get("VIGIA_BRIDGE_URL"),
+                        help="Publicar eventos al puente de la UI en --serve (VIGIA_BRIDGE_URL).")
     parser.add_argument(
         "--decision",
         choices=["approve", "reject", "prompt"],
@@ -422,6 +581,14 @@ def main(argv: list[str] | None = None) -> int:
         "--actor", default="oncall-lead", help="Authenticated actor ID for decision."
     )
     args = parser.parse_args(argv)
+    bridge_client = None
+    if args.bridge_url:
+        if not args.serve:
+            parser.error("--bridge-url requiere --serve")
+        try:
+            bridge_client = BridgeClient(args.bridge_url, os.environ.get("VIGIA_BRIDGE_TOKEN", ""))
+        except ValueError as exc:
+            parser.error(str(exc))
 
     profile = RuntimeProfile(args.profile)
     mode = OperationalMode(
@@ -430,20 +597,11 @@ def main(argv: list[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="vigia-demo-") as tmp:
         tmp_path = Path(tmp)
-        fixtures_dir, repos, base_sha, deployed_sha = _bootstrap_demo_workspace(tmp_path)
+        runtime_cfg, base_sha, deployed_sha = _build_runtime_config(args, tmp_path, profile, mode)
         model: str | BaseChatModel = (
             _OfflineDemoChatModel(base_sha=base_sha, deployed_sha=deployed_sha)
             if args.demo_offline
             else args.model
-        )
-        runtime_cfg = PilotRuntimeConfig(
-            profile=profile,
-            mode=mode,
-            fixtures_dir=fixtures_dir,
-            authorized_repos=repos,
-            db_path=tmp_path / "vigia.db",
-            audit_path=tmp_path / "audit.jsonl",
-            strict_rollback_validation=(profile == RuntimeProfile.PILOT),
         )
         service, _, _ = build_pilot_case_service(runtime_cfg, model=model)
         try:
@@ -462,11 +620,14 @@ def main(argv: list[str] | None = None) -> int:
                     session_secret=os.environ.get("VIGIA_SESSION_SECRET"),
                     trusted_proxy_token=os.environ.get("VIGIA_TRUSTED_PROXY_TOKEN"),
                     allow_demo_console_session=(profile == RuntimeProfile.DEMO),
-                    auto_process_alerts=True,
+                    auto_process_alerts=False,
                 )
                 print(f"Serving Vigía Pilot API & Console at http://{args.host}:{args.port} (mode={mode.value})")
                 try:
-                    serve_http(app, host=args.host, port=args.port)
+                    relay = (BridgeRelay(service, bridge_client, runtime_cfg.db_path, simulated=True)
+                             if bridge_client else nullcontext())
+                    with relay:
+                        serve_http(app, host=args.host, port=args.port)
                 except KeyboardInterrupt:
                     return 0
                 return 0
