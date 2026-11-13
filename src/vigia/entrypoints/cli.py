@@ -347,7 +347,30 @@ def _bootstrap_demo_workspace(temp_root: Path) -> tuple[Path, dict[str, Path], s
     return fixtures_copy, {"applications/pagos-core": repo_dir}, base_sha, deployed_sha
 
 
+def _load_dotenv(env_path: Path) -> None:
+    """Load simple KEY=VALUE pairs from a .env file without overriding existing env vars."""
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_dotenv(Path.cwd() / ".env")
     parser = argparse.ArgumentParser(description="Vigía Investigator CLI & Pilot Server")
     parser.add_argument(
         "--service", default="Transferencias", help="Target alert service name or alias."

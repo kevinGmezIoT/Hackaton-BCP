@@ -88,3 +88,20 @@ def test_wheel_contains_runtime_and_demo_and_cli_runs_outside_checkout(
     )
     assert "case status = closed" in proc.stdout
     assert "184.0 ms" in proc.stdout
+
+
+def test_cli_loads_dotenv_without_overriding_existing_env(tmp_path: Path, monkeypatch) -> None:
+    from vigia.entrypoints.cli import _load_dotenv
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# comment\nGEMINI_API_KEY='from-dotenv'\nEXISTING_VAR=\"ignored\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("EXISTING_VAR", "from-shell")
+
+    _load_dotenv(env_file)
+
+    assert os.environ.get("GEMINI_API_KEY") == "from-dotenv"
+    assert os.environ.get("EXISTING_VAR") == "from-shell"
