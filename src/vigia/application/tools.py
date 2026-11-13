@@ -416,7 +416,8 @@ class CaseToolKit:
             tool_name="resolve_release",
             sanitized_args={"service": canonical, "environment": env},
             payload={"despliegues": [
-                {"id": r.release_id, "hora": r.deployed_at.strftime("%H:%M:%S")}
+                {"id": r.release_id, "hora": r.deployed_at.strftime("%H:%M:%S"),
+                 "desplegado_en": r.deployed_at.isoformat()}
                 for r in result.releases
             ]},
             status=result.status.value,
@@ -472,6 +473,7 @@ class CaseToolKit:
             sanitized_args={"service": canonical, "hours": hours},
             payload={"despliegues": [
                 {"id": r.release_id, "hora": r.deployed_at.strftime("%H:%M:%S"),
+                 "desplegado_en": r.deployed_at.isoformat(),
                  "servicio": r.service, "descripcion": r.summary}
                 for r in sorted(result.releases, key=lambda item: item.deployed_at, reverse=True)
             ]},
@@ -895,7 +897,9 @@ class CaseToolKit:
 
         self._audit_and_emit(
             tool_name="search_logs",
-            payload={"total": result.total, "primera_ocurrencia": (
+            payload={"total": result.total, "primera_ocurrencia_iso": (
+                result.first_occurrence.isoformat() if result.first_occurrence else None
+            ), "primera_ocurrencia": (
                 result.first_occurrence.strftime("%H:%M:%S") if result.first_occurrence else None
             )},
             sanitized_args={

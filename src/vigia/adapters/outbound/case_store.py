@@ -1017,6 +1017,12 @@ class SqliteCaseStoreAdapter:
         for gap in snapshot.connector_gaps:
             if gap not in case.connector_gaps:
                 case.connector_gaps.append(gap)
+        for event in snapshot.events:
+            if event.sequence_id == 0 and event.event_type == EventType.STEP:
+                copied_event = event.model_copy(update={
+                    "payload": {**event.payload, "revision_number": new_rev_num}
+                })
+                self._append_event_in_tx(case, copied_event)
         return added_ids
 
     def publish_follow_up_transactional(

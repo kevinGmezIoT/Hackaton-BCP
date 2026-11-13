@@ -67,7 +67,6 @@ def test_real_bridge_roundtrip_and_restart(frontend, transfers_workspace, tmp_pa
             events = ui.get("/api/caso").json()["eventos"]
             assert any(e["tipo"] == "propuesta" for e in events)
             p = next(e for e in events if e["tipo"] == "propuesta")
-            assert ui.post("/api/aprobacion", json={"caso": case.case_id, "decision": vote}).status_code == 409
             body = {"caso": case.case_id, "decision": vote, "actor": "Operador UI",
                     "proposal_id": p["proposal_id"], "proposal_version": p["proposal_version"]}
             assert ui.post("/api/aprobacion", json=body).status_code == 200
@@ -89,7 +88,10 @@ def test_real_bridge_roundtrip_and_restart(frontend, transfers_workspace, tmp_pa
 
 
 def test_remote_chat_uses_case_context_and_preserves_token_boundary(frontend, transfers_workspace, monkeypatch):
-    service, case, _ = _run_investigator_to_proposal(transfers_workspace)
+    from test_conversational import _write_two_release_manifest, _write_logs_for_variant, _open_initial_case
+    _write_two_release_manifest(transfers_workspace)
+    _write_logs_for_variant(transfers_workspace, "causal_change")
+    service, _, case, _ = _open_initial_case(transfers_workspace)
     app = VigiaHttpApp(service, bridge_token="integration-token", require_user_auth=True)
     backend = create_http_server(app, host="127.0.0.1", port=0)
     worker = CaseWorkWorker(service)
@@ -109,8 +111,25 @@ def test_remote_chat_uses_case_context_and_preserves_token_boundary(frontend, tr
             assert "CHG-4821" in reply.json()["respuesta"]
             assert reply.json()["fuentes"]
             ui.post("/api/chat", json=body)
-            assert len(service.list_messages(case.case_id)) == 1
+            assert len(service.list_messages(case.case_id)) == 2
+            assert ui.post("/api/chat", json={"mensaje": "¿Por qué recomiendas revertir?"}).status_code == 200
+            assert len(service.list_messages(case.case_id)) == 3
             assert service.get_case(case.case_id).decision is None
+            follow = ui.post("/api/chat", json={"mensaje": "¿Y si fue el tráfico? Compara las tasas."})
+            assert follow.status_code == 200
+            assert follow.json()["respuesta"] and follow.json()["fuentes"]
+            assert "compare_cohort_error_rates" in follow.json()["herramientas"]
+            assert service.get_case(case.case_id).proposal.version == 2
+            # The bridge also notifies /decision. The notification is acknowledged, then
+            # the durable vote is consumed by long-poll, preventing a second executor path.
+            ack = httpx.post(frontend.AGENTE_URL + "/decision", json={"caso": case.case_id, "decision": "aprobar"},
+                             headers={"X-Vigia-Token": "integration-token"}, timeout=5)
+            assert ack.status_code == 200
+            assert service.get_case(case.case_id).decision is None
+            monkeypatch.setattr(service, "_clock", lambda: case.alert.effective_cutoff)
+            manual = ui.post("/api/alerta", json={"servicio": "transferencias"})
+            assert manual.status_code == 200
+            assert manual.json()["caso"] != case.case_id
     finally:
         backend.shutdown()
         backend.server_close()
@@ -135,15 +154,18 @@ def test_reinvestigation_updates_remote_card(frontend, transfers_workspace, tmp_
             service.submit_chat_message(case_id=case.case_id, client_message_id="challenge",
                                         actor="Operador UI", text="¿Y si fue el tráfico? Compara las tasas.")
             relay.deliver()
-            assert ui.post("/api/aprobacion", json=old_vote).status_code == 409
+            # The unmodified bridge accepts a vote on the old card. Vigía refuses to execute it.
+            assert ui.post("/api/aprobacion", json=old_vote).status_code == 200
+            relay.poll()
+            assert not simulation.rolled_back_releases
             service.process_pending_work(case.case_id)
             relay.deliver()
             assert ui.post("/api/aprobacion", json=old_vote).status_code == 409
             if variant == "causal_change":
                 events = ui.get("/api/caso").json()["eventos"]
                 p = next(e for e in reversed(events) if e["tipo"] == "propuesta")
-                assert p["proposal_version"] == 2 and p["estado"] == "pending"
-                assert ui.post("/api/aprobacion", json={**old_vote, "proposal_version": 2}).status_code == 200
+                assert p["proposal_version"] == 2 and p["caso"] == case.case_id + "-R2"
+                assert ui.post("/api/aprobacion", json={**old_vote, "caso": p["caso"]}).status_code == 200
                 relay.poll()
                 assert "CHG-4821" in simulation.rolled_back_releases
             else:

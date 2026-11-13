@@ -103,7 +103,7 @@ def test_bridge_delivers_retries_waits_and_closes(transfers_workspace, tmp_path,
             assert any(m.get("rol") == "Acción" and m["simulada"] for m in messages)
             assert ("CHG-4821" in state.rolled_back_releases) == (vote == "aprobar")
             if vote == "aprobar":
-                assert messages[-2]["rol"] == "Verificación"
+                assert messages[-2]["herramienta"] == "verificar_recuperacion"
             previous = ids.copy()
             relay.db.close()
             relay = BridgeRelay(service, client, path, simulated=True)

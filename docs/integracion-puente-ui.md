@@ -1,5 +1,7 @@
 # Vigía · Contrato de integración con el puente de la demo
 
+La integración con el frontend original, incluida la configuración entre servidores y las revisiones de propuestas, está descrita en [Compatibilidad con FrontendHackatonCIO](compatibilidad-frontend.md).
+
 El navegador muestra los datos del puente del equipo de UI. Vigía es cliente HTTP del puente. El monitor abre el caso en Vigía cuando el tráfico de prueba muestra una degradación. Para el recorrido principal, el primer evento publicado por Vigía da a conocer el caso a la UI.
 
 ## Arranque de la integración implementada

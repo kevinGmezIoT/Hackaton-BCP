@@ -687,7 +687,7 @@ class VigiaHttpApp:
         hdrs = self._normalize_headers(headers)
         bridge_path = urllib.parse.urlsplit(raw_path).path
         if method.upper() == "POST" and bridge_path in {
-            self._bridge_api.chat_path, self._bridge_api.investigate_path
+            self._bridge_api.chat_path, self._bridge_api.investigate_path, self._bridge_api.notify_path
         }:
             status, data = self._bridge_api.handle(bridge_path, hdrs.get("x-vigia-token", ""), body)
             if status == 202:
@@ -695,6 +695,8 @@ class VigiaHttpApp:
                     self._service.process_pending_work(data["caso"])
                 elif self._on_work_enqueued:
                     self._on_work_enqueued(data["caso"])
+                if bridge_path == self._bridge_api.chat_path:
+                    status, data = self._bridge_api.wait_for_chat(data["caso"], data["turno"])
             return self._json_response(status, data)
         parsed = urllib.parse.urlsplit(raw_path)
         path = parsed.path.rstrip("/") or "/"

@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import uuid
+import time
 
 from pydantic import ValidationError
 
@@ -20,6 +21,7 @@ class BridgeAgentApi:
         self.token = token
         self.chat_path = os.environ.get("VIGIA_BRIDGE_CHAT_PATH", "/chat")
         self.investigate_path = os.environ.get("VIGIA_BRIDGE_INVESTIGATE_PATH", "/investigar")
+        self.notify_path = os.environ.get("VIGIA_BRIDGE_NOTIFY_PATH", "/decision")
         self.actor = os.environ.get("VIGIA_BRIDGE_ACTOR", "operador-puente")
 
     def handle(self, path: str, token: str, body: bytes | str) -> tuple[int, dict]:
@@ -31,6 +33,8 @@ class BridgeAgentApi:
                 raise ValueError("El cuerpo debe ser un objeto JSON.")
             if path == self.investigate_path:
                 return self.investigate(request)
+            if path == self.notify_path:
+                return 200, {"ok": True}  # The durable vote is consumed through the bridge long-poll.
             return self.chat(request)
         except (ValidationError, ValueError) as exc:
             return 400, {"error": str(exc)}
@@ -53,7 +57,8 @@ class BridgeAgentApi:
         key = request.get("client_message_id") or str(uuid.uuid4())
         result = self.service.ingest_alert(AlertEnvelope(
             source="puente-ui", event_id=str(key), episode_id=f"manual-{key}",
-            alert=Alert(service=config.service, environment=config.environment, metric=metric,
+            alert=Alert(case_id=f"CASE-{uuid.uuid4().hex}", service=config.service,
+                        environment=config.environment, metric=metric,
                         observed_at=now, cutoff_at=now, current_value=reading.current_value,
                         threshold_value=config.threshold_ms, symptom="Revisión solicitada desde la consola")))
         return 202, {"caso": result.case_id}
@@ -61,13 +66,21 @@ class BridgeAgentApi:
     def chat(self, request: dict) -> tuple[int, dict]:
         case_id = request.get("caso")
         message = request.get("mensaje")
-        key = request.get("client_message_id")
+        key = request.get("client_message_id") or str(uuid.uuid4())
+        if not case_id:
+            cases = self.service.list_cases(service=os.environ.get("VIGIA_BRIDGE_SERVICE") or None)
+            if not cases:
+                return 409, {"error": "Todavía no hay un caso abierto por el agente."}
+            case_id = max(cases, key=lambda c: c.created_at).case_id
         if not all(isinstance(v, str) and v.strip() for v in (case_id, message, key)):
             raise ValueError("Se requieren caso, mensaje y client_message_id.")
         result = self.service.submit_chat_message(
             case_id=case_id, client_message_id=key, actor=self.actor, text=message,
             base_revision=request.get("base_revision"), proposal_id=request.get("proposal_id"))
-        turn = next(t for t in self.service.list_messages(case_id) if t.turn_id == result.turn_id)
+        return self.reply(case_id, result.turn_id)
+
+    def reply(self, case_id: str, turn_id: str) -> tuple[int, dict]:
+        turn = next(t for t in self.service.list_messages(case_id) if t.turn_id == turn_id)
         case = self.service.get_case(case_id)
         tools = [e.tool_name for e in case.events
                  if e.tool_name and set(e.references) & set(turn.referenced_evidence_ids)]
@@ -75,3 +88,12 @@ class BridgeAgentApi:
             "caso": case_id, "turno": turn.turn_id, "estado": turn.status.value,
             "respuesta": turn.answer, "herramientas": list(dict.fromkeys(tools)),
             "fuentes": turn.referenced_evidence_ids}
+
+    def wait_for_chat(self, case_id: str, turn_id: str) -> tuple[int, dict]:
+        deadline = time.monotonic() + float(os.environ.get("VIGIA_BRIDGE_CHAT_TIMEOUT", "45"))
+        while time.monotonic() < deadline:
+            status, reply = self.reply(case_id, turn_id)
+            if status != 202:
+                return status, reply
+            time.sleep(.1)
+        return 504, {"error": "La comprobación continúa. Consulta su avance en la investigación."}
