@@ -1,0 +1,295 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Consola Vigía</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: una sola página, como el MVP real. Arriba el servicio y el disparador; al medio el agente trabajando y la decisión humana; abajo la auditoría */
+:root{
+  --bg:#EEF2F6; --panel:#FFFFFF; --ink:#13213A; --muted:#55657D; --line:#D7DEE7; --sunk:#F5F7FA;
+  --accent:#0F6A88; --accent-soft:#DCEEF4; --signal:#9A6A00; --signal-soft:#FBF0D6;
+  --crit:#B3382E; --crit-soft:#F8E1DE; --ok:#2E7D4F; --ok-soft:#DDF0E4;
+  --f-display:"Sora","Segoe UI",system-ui,sans-serif;
+  --f-body:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0D1520; --panel:#152131; --ink:#E5ECF3; --muted:#9AABBF; --line:#273649; --sunk:#111B28;
+  --accent:#55B6D4; --accent-soft:#16344A; --signal:#F0B940; --signal-soft:#3A2F14;
+  --crit:#EE8076; --crit-soft:#3D1D1B; --ok:#5DBB84; --ok-soft:#173326; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0D1520; --panel:#152131; --ink:#E5ECF3; --muted:#9AABBF; --line:#273649; --sunk:#111B28;
+  --accent:#55B6D4; --accent-soft:#16344A; --signal:#F0B940; --signal-soft:#3A2F14;
+  --crit:#EE8076; --crit-soft:#3D1D1B; --ok:#5DBB84; --ok-soft:#173326; color-scheme:dark}
+
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.5}
+.page{max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:16px;
+  padding-block:16px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.brand{font-family:var(--f-display);font-weight:700;font-size:22px;display:flex;align-items:center;gap:10px}
+.brand i{width:10px;height:10px;border-radius:50%;background:var(--ok)}
+.mock{font-family:var(--f-mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase;background:var(--signal-soft);color:var(--signal);padding:3px 8px;border-radius:4px}
+.who{margin-left:auto;font-family:var(--f-mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+h2{font-family:var(--f-display);font-size:16px;font-weight:600;margin:0}
+h3{font-size:15px;margin:0;font-weight:600}
+p{margin:0}
+.muted{color:var(--muted)}
+code{font-family:var(--f-mono);font-size:12.5px;background:var(--sunk);border:1px solid var(--line);border-radius:4px;padding:0 5px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;align-items:start}
+.stack{display:flex;flex-direction:column;gap:16px;min-width:0}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;border-radius:999px;padding:2px 10px;white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.p-crit{background:var(--crit-soft);color:var(--crit)} .p-warn{background:var(--signal-soft);color:var(--signal)}
+.p-ok{background:var(--ok-soft);color:var(--ok)} .p-info{background:var(--accent-soft);color:var(--accent)}
+.btn{font:inherit;font-weight:500;border-radius:6px;padding:8px 14px;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--panel)}
+.btn.danger{color:var(--crit)}
+.btn:disabled{opacity:.45;cursor:default}
+.btn:focus-visible,.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.metric{font-family:var(--f-display);font-size:28px;font-weight:700;font-variant-numeric:tabular-nums}
+.chart{width:100%;height:auto;display:block}
+.empty{padding:20px;text-align:center;color:var(--muted);background:var(--sunk);border:1px dashed var(--line);border-radius:8px}
+
+.timeline{list-style:none;margin:0;padding:0;position:relative}
+.timeline::before{content:"";position:absolute;left:79px;top:8px;bottom:8px;width:2px;background:var(--line)}
+.ev{display:grid;grid-template-columns:66px 20px minmax(0,1fr);gap:0 10px;padding:8px 0}
+.ev .t{font-family:var(--f-mono);font-size:12px;color:var(--muted);padding-top:2px;font-variant-numeric:tabular-nums}
+.ev .node{width:12px;height:12px;border-radius:50%;background:var(--panel);border:2px solid var(--accent);margin:4px 0 0 4px;position:relative;z-index:1}
+.ev.k-human .node{border-color:var(--signal);background:var(--signal)}
+.ev.k-act .node{border-color:var(--ok);background:var(--ok)}
+.ev .b{display:flex;flex-direction:column;gap:4px;min-width:0}
+.ev .h{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.role{font-size:12px;font-weight:600;color:var(--accent)}
+.ev.k-human .role{color:var(--signal)} .ev.k-act .role{color:var(--ok)}
+.sim{font-family:var(--f-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);border:1px dashed var(--line);border-radius:4px;padding:0 5px}
+details{font-size:12.5px}
+summary{cursor:pointer;color:var(--muted)}
+pre{font-family:var(--f-mono);font-size:12px;background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:10px;margin:6px 0 0;overflow-x:auto;white-space:pre}
+.working{font-style:italic;color:var(--muted);padding:6px 0 0 96px}
+
+.reco{border:1px solid var(--signal);background:var(--signal-soft);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px}
+.reco.done{border-color:var(--ok);background:var(--ok-soft)}
+.reco.rej{border-color:var(--line);background:var(--sunk)}
+.reco ul{margin:0;padding-left:18px}
+
+.chat{display:flex;flex-direction:column;gap:10px;max-height:360px;overflow-y:auto}
+.msg{max-width:100%}
+.msg.user{align-self:flex-end;background:var(--accent);color:var(--panel);border-radius:12px 12px 2px 12px;padding:8px 12px;max-width:85%}
+.msg.bot{background:var(--sunk);border:1px solid var(--line);border-radius:12px 12px 12px 2px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.toolrun{display:flex;flex-wrap:wrap;gap:6px}
+.toolrun span{font-family:var(--f-mono);font-size:11.5px;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--muted)}
+.toolrun span::before{content:"✓ ";color:var(--ok)}
+.src{font-size:12px;color:var(--muted)}
+.msg table{border-collapse:collapse;font-size:13px}
+.msg td,.msg th{padding:4px 12px 4px 0;text-align:left;border-bottom:1px solid var(--line)}
+.suggest{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:5px 12px;cursor:pointer}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.composer{display:flex;gap:8px}
+.composer input{flex:1;min-width:0;font:inherit;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
+.composer input:focus{outline:2px solid var(--accent);border-color:transparent}
+
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+.tbl{border-collapse:collapse;width:100%;min-width:640px;font-size:13px}
+.tbl th{text-align:left;font-weight:600;font-size:12px;color:var(--muted);padding:8px 12px;border-bottom:1px solid var(--line);background:var(--sunk)}
+.tbl td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.tbl tr:last-child td{border-bottom:0}
+.tbl td.t{font-family:var(--f-mono);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tag{font-family:var(--f-mono);font-size:11px;padding:1px 6px;border-radius:4px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.tag.w{background:var(--signal-soft);color:var(--signal)}
+@media (max-width:900px){.cols{grid-template-columns:1fr}.timeline::before{left:79px}.working{padding-left:0}}
+</style>
+
+<div class="page">
+  <div class="top">
+    <div class="brand"><i aria-hidden="true"></i>Vigía</div>
+    <span class="mock">Maqueta del MVP · datos simulados</span>
+    <span class="who" id="who"></span>
+    <button class="btn" id="reset" type="button">Reiniciar demo</button>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <h2>Transferencias · latencia p95</h2>
+      <span id="svc-pill"></span>
+      <span class="metric" id="svc-metric" style="margin-left:auto"></span>
+    </div>
+    <svg class="chart" id="chart" viewBox="0 0 720 230" role="img" aria-label="Latencia p95 de Transferencias por minuto frente al umbral de 800 ms"></svg>
+    <div class="row">
+      <button class="btn primary" id="simulate" type="button">Simular alerta de latencia</button>
+      <span class="muted" id="svc-note"></span>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div class="card">
+      <div class="row"><h2>Cómo interviene el agente</h2><span class="muted" id="case-id" style="margin-left:auto;font-family:var(--f-mono);font-size:12px"></span></div>
+      <div id="timeline-wrap"></div>
+    </div>
+    <div class="stack">
+      <div class="card">
+        <h2>Decisión humana</h2>
+        <div id="reco"></div>
+      </div>
+      <div class="card">
+        <h2>Consola de consultas</h2>
+        <div class="chat" id="chat" aria-live="polite"></div>
+        <div class="suggest" id="suggest"></div>
+        <form class="composer" id="composer">
+          <input id="q" type="text" aria-label="Consulta para Vigía" placeholder="Pregunta sobre el servicio, cambios o incidentes" autocomplete="off">
+          <button class="btn primary" type="submit">Enviar</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Auditoría</h2>
+    <p class="muted">Cada llamada a herramienta y cada decisión queda registrada. Los registros más recientes van primero.</p>
+    <div id="audit-wrap"></div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary><b style="color:var(--ink)">Herramientas del agente (7) y alcance del MVP</b></summary>
+      <div class="tablewrap" style="margin-top:12px"><table class="tbl">
+        <thead><tr><th>Herramienta</th><th>Rol que se muestra</th><th>Qué hace en el MVP</th><th>Tipo</th></tr></thead>
+        <tbody id="toolrows"></tbody>
+      </table></div>
+      <p class="muted" style="margin-top:10px">En el MVP el modelo decide qué herramienta llamar y en qué orden. Los datos son archivos de ejemplo y la ejecución de la acción es simulada: no se toca ningún sistema del banco.</p>
+    </details>
+  </div>
+</div>
+
+<script>
+(function(){
+var $=function(s){return document.querySelector(s)};
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function hhmm(t){var m=8*60+45+t;return String(Math.floor(m/60)).padStart(2,"0")+":"+String(m%60).padStart(2,"0")}
+
+/* ---------- Datos del escenario (simulados) ---------- */
+var noise=[0,2,-1,3,1,-2,0,2,1,-1,2,0,1];
+var base=noise.map(function(n){return 180+n});                    /* 08:45 a 08:57 */
+var rise=[];for(var i=13;i<=27;i++)rise.push(180+(i-12)*16);      /* 08:58 a 09:12: llega a 420 */
+var recover=[400,330,270,230,205,190,184];                        /* tras el rollback */
+var UMBRAL=800,DEPLOY_T=10,PROJ_T=51;
+
+var TOOLS=[
+ ["consultar_metricas","Detección","Lee la serie de latencia de metricas.csv","Lectura"],
+ ["detectar_anomalia","Detección","Z-score frente a la línea base y proyección lineal del cruce del umbral","Lectura"],
+ ["listar_cambios","Cambios","Filtra cambios.json por servicio y ventana de tiempo","Lectura"],
+ ["buscar_logs","Diagnóstico","Cuenta un patrón de error en logs.txt","Lectura"],
+ ["buscar_incidentes_similares","Diagnóstico","Similitud de texto (TF-IDF) sobre incidentes.json","Lectura"],
+ ["buscar_runbook","Diagnóstico","Búsqueda por palabras clave en los runbooks","Lectura"],
+ ["proponer_accion","Recomendación","Propone una acción; si el riesgo es medio o alto, el agente se detiene y espera aprobación","Control"]
+];
+var RUN=[
+ {t:"09:12:04",role:"Detección",tool:"consultar_metricas",args:{servicio:"transferencias",metrica:"latencia_p95",minutos:30},out:"La latencia p95 pasó de 180 ms a 420 ms en 15 minutos."},
+ {t:"09:12:09",role:"Detección",tool:"detectar_anomalia",args:{servicio:"transferencias",metrica:"latencia_p95"},out:"Anomalía confirmada (z = 4,7). Si la tendencia sigue, cruza el umbral de 800 ms en unos 24 minutos."},
+ {t:"09:12:15",role:"Cambios",tool:"listar_cambios",args:{servicio:"transferencias",horas:3},out:"CHG-4821 se desplegó a las 08:55 en pagos-core, del que depende Transferencias: redujo el pool de conexiones de 80 a 50."},
+ {t:"09:12:21",role:"Diagnóstico",tool:"buscar_logs",args:{servicio:"pagos-core",patron:"Connection pool exhausted",minutos:15},out:"312 errores «Connection pool exhausted» desde las 09:01."},
+ {t:"09:12:28",role:"Diagnóstico",tool:"buscar_incidentes_similares",args:{descripcion:"latencia creciente, pool de conexiones agotado tras cambio",k:3},out:"INC-3512 (similitud 0,91) e INC-3307 (0,84): misma causa, ambos resueltos con rollback."},
+ {t:"09:12:34",role:"Diagnóstico",tool:"buscar_runbook",args:{consulta:"pool de conexiones agotado pagos-core"},out:"RB-087 indica el rollback del cambio como primera acción."},
+ {t:"09:12:41",role:"Recomendación",tool:"proponer_accion",args:{accion:"revertir_cambio",objetivo:"CHG-4821"},out:"Propone revertir CHG-4821. Riesgo alto: el agente se detiene y espera aprobación.",k:"human"}
+];
+var RECO={text:"Revertir el cambio CHG-4821 para restaurar el pool de conexiones de pagos-core.",
+ ev:["Los errores empezaron a las 09:01, seis minutos después del despliegue de CHG-4821","312 errores de pool agotado en los logs de pagos-core","Mismo patrón que INC-3512 e INC-3307, resueltos con rollback","El runbook RB-087 indica rollback como primera acción"]};
+var CHAT={
+ "¿Qué cambios se desplegaron hoy?":{tools:["listar_cambios"],html:'Hoy hay 3 cambios registrados:<table><tr><th>Cambio</th><th>Servicio</th><th>Hora</th></tr><tr><td><code>CHG-4821</code></td><td>pagos-core</td><td>08:55</td></tr><tr><td><code>CHG-4818</code></td><td>portal-web</td><td>07:30</td></tr><tr><td><code>CHG-4815</code></td><td>notificaciones</td><td>06:10</td></tr></table>',src:"Fuente: cambios.json"},
+ "¿Cómo se resolvió el último incidente parecido?":{tools:["buscar_incidentes_similares"],html:'El más parecido es <code>INC-3512</code>. Un cambio redujo el pool de conexiones de pagos-core y se agotó con el tráfico de mediodía. Duró 47 minutos y se resolvió con rollback; después se fijó el pool en 80 conexiones.',src:"Fuente: incidentes.json"}
+};
+var Q_STATE="¿Qué está pasando con Transferencias?";
+
+/* ---------- Estado ---------- */
+var S,timers=[];
+function reset(){timers.forEach(clearTimeout);timers=[];
+  S={phase:"idle",series:base.slice(),steps:[],audit:[],working:false};
+  $("#chat").innerHTML='<div class="msg bot">Hola. Puedo revisar el estado de Transferencias, los cambios del día y los incidentes anteriores. Las acciones riesgosas siempre te las consulto antes.</div>';
+  render()}
+function later(fn,ms){timers.push(setTimeout(fn,ms))}
+function addStep(s){S.steps.push(s);S.audit.unshift([s.t,s.role==="Humano"?"Líder de Transferencias":"Agente ("+s.role+")",s.tool,s.res||s.out.split(".")[0]]);render()}
+
+/* ---------- Gráfico ---------- */
+function chart(){var W=720,H=230,l=46,r=14,tp=16,b=28,xm=55,ym=900;
+  var x=function(t){return l+(t/xm)*(W-l-r)},y=function(v){return tp+(1-v/ym)*(H-tp-b)};
+  var h='';
+  [0,200,400,600,800].forEach(function(v){h+='<line x1="'+l+'" x2="'+(W-r)+'" y1="'+y(v)+'" y2="'+y(v)+'" stroke="var(--line)" stroke-width="1"/><text x="'+(l-8)+'" y="'+(y(v)+4)+'" text-anchor="end" font-size="11" font-family="IBM Plex Mono,monospace" fill="var(--muted)">'+v+'</text>'});
+  [0,15,30,45].forEach(function(t){h+='<text x="'+x(t)+'" y="'+(H-8)+'" text-anchor="middle" font-size="11" font-family="IBM Plex Mono,monospace" fill="var(--muted)">'+hhmm(t)+'</text>'});
+  h+='<line x1="'+l+'" x2="'+(W-r)+'" y1="'+y(UMBRAL)+'" y2="'+y(UMBRAL)+'" stroke="var(--crit)" stroke-width="1.5" stroke-dasharray="6 5"/><text x="'+(W-r)+'" y="'+(y(UMBRAL)-6)+'" text-anchor="end" font-size="11" font-family="IBM Plex Sans,sans-serif" fill="var(--crit)">Umbral de impacto: 800 ms</text>';
+  h+='<line x1="'+x(DEPLOY_T)+'" x2="'+x(DEPLOY_T)+'" y1="'+y(700)+'" y2="'+y(0)+'" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 4"/><text x="'+(x(DEPLOY_T)+5)+'" y="'+(y(700)+10)+'" font-size="11" font-family="IBM Plex Mono,monospace" fill="var(--muted)">CHG-4821 · 08:55</text>';
+  var pts=S.series.map(function(v,i){return x(i).toFixed(1)+","+y(v).toFixed(1)});
+  var col=S.phase==="idle"||S.phase==="approved"?"var(--accent)":"var(--signal)";
+  h+='<polygon points="'+x(0)+','+y(0)+' '+pts.join(" ")+' '+x(S.series.length-1)+','+y(0)+'" fill="'+col+'" opacity=".1"/>';
+  h+='<polyline points="'+pts.join(" ")+'" fill="none" stroke="'+col+'" stroke-width="2.5" stroke-linejoin="round"/>';
+  var li=S.series.length-1,lv=S.series[li];
+  if(S.phase==="running"||S.phase==="pending"||S.phase==="rejected"){
+    h+='<line x1="'+x(li)+'" y1="'+y(lv)+'" x2="'+x(PROJ_T)+'" y2="'+y(804)+'" stroke="var(--signal)" stroke-width="2" stroke-dasharray="5 5" opacity=".7"/>';
+    h+='<text x="'+(x(PROJ_T)-6)+'" y="'+(y(804)+18)+'" text-anchor="end" font-size="11" font-family="IBM Plex Sans,sans-serif" fill="var(--signal)">Cruce estimado en ~24 min</text>'}
+  h+='<circle cx="'+x(li)+'" cy="'+y(lv)+'" r="4.5" fill="'+col+'"/>';
+  $("#chart").innerHTML=h}
+
+/* ---------- Render ---------- */
+function render(){
+  chart();
+  var last=S.series[S.series.length-1],idle=S.phase==="idle",okp=S.phase==="approved"&&S.series.length>30;
+  $("#svc-metric").textContent=last+" ms";
+  $("#svc-pill").innerHTML=idle?'<span class="pill p-ok">Normal</span>':okp?'<span class="pill p-ok">Recuperado</span>':'<span class="pill p-warn">Latencia en aumento</span>';
+  $("#svc-note").textContent=idle?"El botón reemplaza a la alerta real del sistema de monitoreo.":okp?"La latencia volvió a su nivel habitual sin llegar al umbral de impacto.":"Aún bajo el umbral: los usuarios todavía no perciben el problema.";
+  $("#simulate").disabled=!idle;
+  $("#who").textContent="Jue 12 nov · "+(idle?"08:57":okp?"09:19":"09:12")+" · Rol: Líder de Transferencias";
+  $("#case-id").textContent=idle?"":"CASO-1042";
+  /* línea de tiempo */
+  if(!S.steps.length&&!S.working)$("#timeline-wrap").innerHTML='<div class="empty">Sin casos abiertos. Pulsa «Simular alerta de latencia» para ver al agente investigar paso a paso.</div>';
+  else $("#timeline-wrap").innerHTML='<ol class="timeline">'+S.steps.map(function(e){var k=e.k?" k-"+e.k:"";
+    return '<li class="ev'+k+'"><span class="t">'+e.t+'</span><span class="node" aria-hidden="true"></span><div class="b"><div class="h"><span class="role">'+e.role+'</span><code>'+e.tool+'</code>'+(e.sim?'<span class="sim">simulada</span>':'')+'</div><p>'+esc(e.out)+'</p>'+(e.args?'<details><summary>Ver llamada a la herramienta</summary><pre>'+esc(e.tool+"("+JSON.stringify(e.args,null,2)+")")+'</pre></details>':'')+'</div></li>'}).join("")+'</ol>'+(S.working?'<p class="working">El agente está decidiendo el siguiente paso…</p>':'');
+  /* decisión */
+  var r=$("#reco");
+  if(S.phase==="idle"||S.phase==="running")r.innerHTML='<div class="empty">'+(S.phase==="idle"?"Aquí aparecerá la recomendación del agente cuando necesite tu aprobación.":"El agente está reuniendo evidencia antes de recomendar.")+'</div>';
+  else{var cls=S.phase==="approved"?" done":S.phase==="rejected"?" rej":"";
+    var h='<div class="reco'+cls+'"><div class="row"><h3>Recomendación</h3><span class="pill p-crit">Riesgo alto</span></div><p>'+RECO.text+'</p><p class="muted">Acción: <code>revertir_cambio("CHG-4821")</code></p><div><b>Evidencia</b><ul>'+RECO.ev.map(function(x){return"<li>"+esc(x)+"</li>"}).join("")+'</ul></div>';
+    if(S.phase==="pending")h+='<div class="row"><button class="btn primary" id="approve" type="button">Aprobar y ejecutar</button><button class="btn danger" id="reject" type="button">Rechazar</button></div>';
+    else if(S.phase==="approved")h+='<p><b>Aprobaste la acción a las 09:14.</b> El agente la ejecutó y verificó el resultado.</p>';
+    else h+='<p><b>Rechazaste la acción a las 09:14.</b> El agente dejó un ticket preventivo para el equipo y el caso sigue abierto.</p>';
+    r.innerHTML=h+'</div>'}
+  /* auditoría */
+  $("#audit-wrap").innerHTML=S.audit.length?'<div class="tablewrap"><table class="tbl"><thead><tr><th>Hora</th><th>Actor</th><th>Herramienta o acción</th><th>Resultado</th></tr></thead><tbody>'+S.audit.map(function(a){return'<tr><td class="t">'+a[0]+'</td><td>'+esc(a[1])+'</td><td><code>'+esc(a[2])+'</code></td><td>'+esc(a[3])+'</td></tr>'}).join("")+'</tbody></table></div>':'<div class="empty">Todavía no hay registros.</div>';
+  /* sugerencias */
+  $("#suggest").innerHTML=[Q_STATE].concat(Object.keys(CHAT)).map(function(q){return'<button class="chip" type="button" data-ask="'+esc(q)+'">'+esc(q)+'</button>'}).join("")}
+
+/* ---------- Flujo ---------- */
+function simulate(){if(S.phase!=="idle")return;S.phase="running";S.series=base.concat(rise);S.working=true;render();
+  RUN.forEach(function(s,i){later(function(){if(i===RUN.length-1){S.phase="pending";S.working=false}addStep(s)},800*(i+1))})}
+function decide(ok){if(S.phase!=="pending")return;
+  if(ok){S.phase="approved";S.working=true;
+    addStep({t:"09:14:05",role:"Humano",tool:"aprobar_accion",out:"El Líder de Transferencias aprobó revertir CHG-4821.",res:"Aprobado",k:"human"});
+    later(function(){addStep({t:"09:14:09",role:"Acción",tool:"revertir_cambio",args:{cambio:"CHG-4821"},out:"Rollback de CHG-4821 ejecutado. En el MVP esta acción es simulada: no toca ningún sistema del banco.",res:"Ejecutada (simulada)",k:"act",sim:true})},800);
+    later(function(){S.series=S.series.concat(recover);S.working=false;
+      addStep({t:"09:19:02",role:"Detección",tool:"consultar_metricas",args:{servicio:"transferencias",metrica:"latencia_p95",minutos:10},out:"La latencia bajó a 184 ms. El servicio se recuperó sin llegar al umbral de impacto."});
+      bot({tools:[],html:"<b>Caso cerrado.</b> La latencia de Transferencias subía por el cambio CHG-4821, que redujo el pool de conexiones de pagos-core. Con tu aprobación se revirtió el cambio y la latencia volvió a 184 ms, sin llegar a los 800 ms de impacto."})},1900)}
+  else{S.phase="rejected";S.working=true;
+    addStep({t:"09:14:05",role:"Humano",tool:"rechazar_accion",out:"El Líder de Transferencias rechazó la reversión.",res:"Rechazado",k:"human"});
+    later(function(){S.working=false;addStep({t:"09:14:08",role:"Acción",tool:"crear_ticket_preventivo",args:{equipo:"Transferencias",prioridad:"alta"},out:"Ticket preventivo TCK-88213 registrado para el equipo con toda la evidencia. Acción de bajo riesgo: no requiere aprobación.",res:"Ejecutada (simulada)",k:"act",sim:true})},800)}}
+
+/* ---------- Consola ---------- */
+function bot(a){var c=$("#chat");c.insertAdjacentHTML("beforeend",'<div class="msg bot">'+(a.tools&&a.tools.length?'<div class="toolrun">'+a.tools.map(function(t){return"<span>"+t+"</span>"}).join("")+'</div>':'')+'<div>'+a.html+'</div>'+(a.src?'<div class="src">'+a.src+'</div>':'')+'</div>');c.scrollTop=c.scrollHeight}
+function stateAnswer(){
+  if(S.phase==="idle")return{tools:["consultar_metricas","detectar_anomalia"],html:"Transferencias opera con normalidad: la latencia p95 está en 181 ms, muy por debajo del umbral de 800 ms, y no detecto anomalías.",src:"Fuente: metricas.csv"};
+  if(S.phase==="approved")return{tools:["consultar_metricas"],html:"Transferencias ya se recuperó: la latencia p95 está en 184 ms tras revertir CHG-4821.",src:"Fuente: metricas.csv"};
+  return{tools:["consultar_metricas","listar_cambios","buscar_logs"],html:"La latencia p95 subió de 180 ms a 420 ms en 15 minutos y, si sigue así, cruzará el umbral de 800 ms en unos 24 minutos. Coincide con el cambio <code>CHG-4821</code>, que redujo el pool de conexiones de pagos-core. "+(S.phase==="pending"?"Mi recomendación de revertirlo espera tu aprobación.":S.phase==="rejected"?"Dejé un ticket preventivo para el equipo.":"Sigo reuniendo evidencia."),src:"Fuentes: metricas.csv · cambios.json · logs.txt"}}
+function ask(q){var c=$("#chat");c.insertAdjacentHTML("beforeend",'<div class="msg user">'+esc(q)+'</div>');c.scrollTop=c.scrollHeight;
+  var a=q===Q_STATE?stateAnswer():CHAT[q]||{tools:[],html:"Esta maqueta solo responde las consultas sugeridas. En el MVP, el agente responde consultas libres usando las mismas herramientas sobre los datos de ejemplo."};
+  later(function(){bot(a)},500)}
+
+document.addEventListener("click",function(e){var t=e.target;
+  if(t.id==="simulate")simulate();else if(t.id==="approve")decide(true);else if(t.id==="reject")decide(false);
+  else if(t.id==="reset")reset();else if(t.dataset&&t.dataset.ask)ask(t.dataset.ask)});
+$("#composer").addEventListener("submit",function(e){e.preventDefault();var v=$("#q").value.trim();if(!v)return;$("#q").value="";ask(v)});
+$("#toolrows").innerHTML=TOOLS.map(function(t){return'<tr><td><code>'+t[0]+'</code></td><td>'+t[1]+'</td><td>'+t[2]+'</td><td><span class="tag'+(t[3]==="Control"?" w":"")+'">'+t[3]+'</span></td></tr>'}).join("");
+reset();
+})();
+</script>
+
+</body></html>

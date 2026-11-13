@@ -1,0 +1,173 @@
+<mxfile host="app.diagrams.net" agent="Claude" version="24.0.0">
+  <diagram id="mvp" name="Arquitectura MVP">
+    <mxGraphModel dx="1500" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="&lt;b&gt;Vigía · Arquitectura del MVP (hackathon de 4 horas)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:12px&quot;&gt;Un agente, un caso de punta a punta, aprobación humana&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;fontSize=16;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="20" y="15" width="520" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="actor" value="Usuario y aprobador" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="50" y="270" width="30" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- LLM -->
+        <mxCell id="llm" value="&lt;b&gt;Modelo LLM (API)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Con tool calling · el que habilite la hackathon&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="660" y="30" width="220" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- UI -->
+        <mxCell id="ui" value="UI web (una página)" style="swimlane;whiteSpace=wrap;html=1;startSize=28;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#F4F8FD;fontStyle=1;fontSize=12;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="140" y="120" width="260" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="ui1" value="Gráfico de latencia&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;+ botón «Simular alerta»&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;spacingLeft=8;" vertex="1" parent="ui">
+          <mxGeometry x="20" y="40" width="220" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="ui2" value="Línea de tiempo del caso&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Un paso por llamada a herramienta&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;spacingLeft=8;" vertex="1" parent="ui">
+          <mxGeometry x="20" y="110" width="220" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="ui3" value="Tarjeta de aprobación&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Aprobar / Rechazar&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;spacingLeft=8;" vertex="1" parent="ui">
+          <mxGeometry x="20" y="180" width="220" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="ui4" value="Consola de consultas (chat)" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;spacingLeft=8;" vertex="1" parent="ui">
+          <mxGeometry x="20" y="250" width="220" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="ui5" value="Tabla de auditoría" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;spacingLeft=8;" vertex="1" parent="ui">
+          <mxGeometry x="20" y="320" width="220" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Backend -->
+        <mxCell id="be" value="Backend (FastAPI, un solo proceso)" style="swimlane;whiteSpace=wrap;html=1;startSize=28;fillColor=#d5e8d4;strokeColor=#82b366;swimlaneFillColor=#F5FAF3;fontStyle=1;fontSize=12;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="480" y="120" width="570" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="api" value="&lt;b&gt;API REST + SSE&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;POST /api/alerta&lt;br&gt;POST /api/chat&lt;br&gt;POST /api/aprobacion&lt;br&gt;GET /api/eventos&lt;br&gt;GET /api/metricas&lt;br&gt;GET /api/auditoria&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;spacingLeft=8;" vertex="1" parent="be">
+          <mxGeometry x="20" y="40" width="160" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="agent" value="&lt;b&gt;Agente&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Bucle de tool calling: el modelo decide qué herramienta usar&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;spacingLeft=8;" vertex="1" parent="be">
+          <mxGeometry x="205" y="40" width="165" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="risk" value="Tabla de riesgo por acción&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;bajo · medio · alto&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;spacingLeft=8;" vertex="1" parent="be">
+          <mxGeometry x="205" y="145" width="165" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="pause" value="Pausa por aprobación&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Estado del caso en memoria&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;spacingLeft=8;" vertex="1" parent="be">
+          <mxGeometry x="205" y="210" width="165" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="exec" value="Ejecutor de acciones&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;SIMULADO: no toca sistemas reales&lt;/font&gt;" style="shape=module;jettyWidth=10;jettyHeight=5;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;dashed=1;fontSize=11;spacingLeft=8;" vertex="1" parent="be">
+          <mxGeometry x="205" y="275" width="165" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="audit" value="audit.jsonl" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=6;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="be">
+          <mxGeometry x="205" y="338" width="165" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="tools" value="7 herramientas (funciones Python)" style="swimlane;whiteSpace=wrap;html=1;startSize=24;fillColor=#E8DCF0;strokeColor=#9673a6;dashed=1;fontStyle=1;fontSize=10;container=1;collapsible=0;" vertex="1" parent="be">
+          <mxGeometry x="395" y="40" width="160" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="t1" value="consultar_metricas" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="tools">
+          <mxGeometry x="10" y="34" width="140" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="t2" value="detectar_anomalia" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="tools">
+          <mxGeometry x="10" y="76" width="140" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="t3" value="buscar_logs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="tools">
+          <mxGeometry x="10" y="118" width="140" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="t4" value="listar_cambios" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="tools">
+          <mxGeometry x="10" y="160" width="140" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="t5" value="buscar_incidentes_similares" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="tools">
+          <mxGeometry x="10" y="202" width="140" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="t6" value="buscar_runbook" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="tools">
+          <mxGeometry x="10" y="244" width="140" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="t7" value="proponer_accion" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="tools">
+          <mxGeometry x="10" y="286" width="140" height="32" as="geometry" />
+        </mxCell>
+
+        <!-- Datos -->
+        <mxCell id="data" value="Datos de ejemplo (archivos locales)" style="swimlane;whiteSpace=wrap;html=1;startSize=28;fillColor=#f5f5f5;strokeColor=#666666;swimlaneFillColor=#FAFAFA;fontStyle=1;fontSize=12;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="1130" y="120" width="240" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="d1" value="metricas.csv&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Latencia p95 por minuto&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=6;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="data">
+          <mxGeometry x="20" y="40" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="logs.txt&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Errores del servicio&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=6;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="data">
+          <mxGeometry x="20" y="110" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" value="cambios.json&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Despliegues del día&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=6;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="data">
+          <mxGeometry x="20" y="180" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" value="incidentes.json&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;15 a 20 incidentes históricos&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=6;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="data">
+          <mxGeometry x="20" y="250" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="d5" value="runbooks/*.md&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;3 a 5 runbooks&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=6;fillColor=#ffffff;strokeColor=#666666;fontSize=11;" vertex="1" parent="data">
+          <mxGeometry x="20" y="320" width="200" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Fuera del MVP -->
+        <mxCell id="next" value="Fuera del MVP · siguiente fase (se reemplazan los datos de ejemplo y lo simulado)" style="swimlane;whiteSpace=wrap;html=1;startSize=26;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;dashPattern=8 4;fontColor=#666666;swimlaneFillColor=#FFFFFF;fontStyle=1;fontSize=11;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="140" y="580" width="1230" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n1" value="Conectores reales de solo lectura&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Observabilidad, ITSM, CI/CD, repos&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontColor=#555555;fontSize=10;" vertex="1" parent="next">
+          <mxGeometry x="15" y="42" width="190" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" value="Ingesta de alertas en tiempo real" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontColor=#555555;fontSize=10;" vertex="1" parent="next">
+          <mxGeometry x="217" y="42" width="190" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" value="Motor de políticas&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Reemplaza la tabla de riesgo&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontColor=#555555;fontSize=10;" vertex="1" parent="next">
+          <mxGeometry x="419" y="42" width="190" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" value="Gestión de secretos y SSO" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontColor=#555555;fontSize=10;" vertex="1" parent="next">
+          <mxGeometry x="621" y="42" width="190" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="n5" value="Acciones reales con aprobación&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Tickets, avisos, rollback por pipeline&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontColor=#555555;fontSize=10;" vertex="1" parent="next">
+          <mxGeometry x="823" y="42" width="190" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" value="Memoria de casos y más agentes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontColor=#555555;fontSize=10;" vertex="1" parent="next">
+          <mxGeometry x="1025" y="42" width="190" height="58" as="geometry" />
+        </mxCell>
+
+        <!-- Conexiones -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="actor" target="ui">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="HTTP / eventos SSE" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;startArrow=block;startFill=1;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="ui" target="api">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.13;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="api" target="agent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="mensajes y tool calls" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;startArrow=block;startFill=1;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="agent" target="llm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="llama" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.13;entryDx=0;entryDy=0;" edge="1" parent="1" source="agent" target="tools">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="agent" target="risk">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="medio / alto" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=9;labelBackgroundColor=#F5FAF3;" edge="1" parent="1" source="risk" target="pause">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="aprobado" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=9;labelBackgroundColor=#F5FAF3;" edge="1" parent="1" source="pause" target="exec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="espera" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;startArrow=block;startFill=1;dashed=1;fontSize=9;labelBackgroundColor=#F5FAF3;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.575;entryDx=0;entryDy=0;" edge="1" parent="1" source="pause" target="api">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="registra" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;dashed=1;fontSize=9;labelBackgroundColor=#F5FAF3;exitX=0;exitY=0.94;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="tools" target="audit">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="lee" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="tools" target="data">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lg" value="&lt;b&gt;Leyenda:&lt;/b&gt; morado = IA · amarillo = control humano · línea discontinua = evento o registro · recuadro gris punteado = no se construye en la hackathon" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="140" y="530" width="1230" height="30" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

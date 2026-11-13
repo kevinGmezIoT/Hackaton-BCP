@@ -1,0 +1,9 @@
+{"timestamp": "2026-11-12T08:45:00-05:00", "service": "pagos-core", "environment": "production", "cohort": "CHG-4810", "level": "INFO", "count": 420, "message": "Authorize requests processed normally (active_pool=38/80)"}
+{"timestamp": "2026-11-12T08:52:00-05:00", "service": "pagos-core", "environment": "production", "cohort": "CHG-4810", "level": "INFO", "count": 430, "message": "Authorize requests processed normally (active_pool=41/80)"}
+{"timestamp": "2026-11-12T08:56:00-05:00", "service": "pagos-core", "environment": "production", "cohort": "CHG-4821", "level": "INFO", "count": 415, "message": "Service started with configured pool_size=50"}
+{"timestamp": "2026-11-12T09:01:04-05:00", "service": "pagos-core", "environment": "production", "cohort": "CHG-4821", "level": "ERROR", "count": 42, "message": "Connection pool exhausted waiting for pagos-db connection (pool_size=50, timeout_ms=250)"}
+{"timestamp": "2026-11-12T09:04:12-05:00", "service": "pagos-core", "environment": "production", "cohort": "CHG-4821", "level": "ERROR", "count": 88, "message": "Connection pool exhausted waiting for pagos-db connection (pool_size=50, timeout_ms=250)"}
+{"timestamp": "2026-11-12T09:08:30-05:00", "service": "pagos-core", "environment": "production", "cohort": "CHG-4821", "level": "ERROR", "count": 96, "message": "Connection pool exhausted waiting for pagos-db connection (pool_size=50, timeout_ms=250)"}
+{"timestamp": "2026-11-12T09:11:45-05:00", "service": "pagos-core", "environment": "production", "cohort": "CHG-4821", "level": "ERROR", "count": 86, "message": "Connection pool exhausted waiting for pagos-db connection (pool_size=50, timeout_ms=250)"}
+{"timestamp": "2026-11-12T09:11:50-05:00", "service": "pagos-core", "environment": "production", "cohort": "CHG-4821", "level": "INFO", "count": 425, "message": "Incoming RPS steady at 425 req/min; no concurrent traffic spike"}
+

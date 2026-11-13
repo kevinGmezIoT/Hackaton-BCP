@@ -1,0 +1,32 @@
+services:
+  - service: transferencias
+    aliases:
+      - Transferencias
+      - transferencias-api
+      - transfers
+    repository: applications/transferencias
+    release_source: fixtures/transfers/releases.json
+    architecture:
+      path: docs/transfers.drawio
+      revision_mode: from_release
+    telemetry:
+      service_selector: transferencias-api
+      environment_selector: production
+    threshold_ms: 800.0
+    owner_team: transfers-squad
+
+  - service: pagos-core
+    aliases:
+      - pagos_core
+      - payments-core
+    repository: applications/pagos-core
+    release_source: fixtures/transfers/releases.json
+    architecture:
+      path: docs/transfers.drawio
+      revision_mode: from_release
+    telemetry:
+      service_selector: pagos-core-api
+      environment_selector: production
+    threshold_ms: 500.0
+    owner_team: core-payments-squad
+

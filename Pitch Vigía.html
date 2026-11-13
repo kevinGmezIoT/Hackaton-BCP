@@ -1,0 +1,314 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Pitch Vigía</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: una diapositiva por vista, encuadre tipo consola de operaciones; navegación inferior fija */
+:root{
+  --bg:#EEF2F6; --panel:#FFFFFF; --ink:#13213A; --muted:#55657D; --line:#D3DBE5;
+  --accent:#0F6A88; --accent-soft:#DCEEF4; --signal:#9A6A00; --signal-soft:#FBF0D6;
+  --ok:#2E7D4F; --ok-soft:#DDF0E4; --crit:#B3382E;
+  --f-display:"Sora","Segoe UI",system-ui,sans-serif;
+  --f-body:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0D1520; --panel:#152131; --ink:#E5ECF3; --muted:#9AABBF; --line:#273649;
+  --accent:#55B6D4; --accent-soft:#16344A; --signal:#F0B940; --signal-soft:#3A2F14;
+  --ok:#5DBB84; --ok-soft:#173326; --crit:#EE8076; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0D1520; --panel:#152131; --ink:#E5ECF3; --muted:#9AABBF; --line:#273649;
+  --accent:#55B6D4; --accent-soft:#16344A; --signal:#F0B940; --signal-soft:#3A2F14;
+  --ok:#5DBB84; --ok-soft:#173326; --crit:#EE8076; color-scheme:dark}
+
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.5}
+.app{height:100%;display:grid;grid-template-rows:1fr auto}
+.stage{position:relative;overflow:hidden}
+.slide{position:absolute;inset:0;overflow-y:auto;padding-block:clamp(20px,4vh,48px);
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.inner{max-width:1120px;margin:0 auto;display:flex;flex-direction:column;gap:clamp(14px,2.4vh,26px);min-height:100%;justify-content:center}
+.eyebrow{font-family:var(--f-mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:-.01em}
+h1{font-size:clamp(38px,6.6vw,80px);line-height:1.03;font-weight:700}
+h2{font-size:clamp(26px,3.6vw,42px);line-height:1.12;font-weight:600}
+h3{font-size:18px;font-weight:600}
+p{margin:0;max-width:65ch}
+.lead{font-size:clamp(17px,1.7vw,21px);color:var(--muted)}
+.muted{color:var(--muted)}
+.mono{font-family:var(--f-mono)}
+code{font-family:var(--f-mono);font-size:.88em}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr))}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.box p{font-size:15px}
+.tag{display:inline-block;font-family:var(--f-mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;border-radius:4px;background:var(--accent-soft);color:var(--accent);align-self:flex-start}
+.tag.sig{background:var(--signal-soft);color:var(--signal)} .tag.ok{background:var(--ok-soft);color:var(--ok)}
+ul.clean{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.cover h1 span{color:var(--accent)}
+.pulse{display:flex;align-items:center;gap:10px;font-family:var(--f-mono);font-size:13px;color:var(--muted)}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--ok)}
+.spark{width:100%;max-width:640px;height:auto}
+.quote{font-family:var(--f-display);font-size:clamp(22px,3vw,34px);line-height:1.25;font-weight:500;border-left:4px solid var(--accent);padding-left:20px;max-width:30ch}
+.flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,165px),1fr));gap:10px;counter-reset:st}
+.step{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:6px}
+.step::before{counter-increment:st;content:counter(st);font-family:var(--f-mono);font-size:12px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;background:var(--accent);color:var(--panel)}
+.step.human::before{background:var(--signal)}
+.step p{font-size:14px;color:var(--muted)}
+.log{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow-x:auto}
+.log table{border-collapse:collapse;width:100%;min-width:640px;font-size:14px}
+.log td{padding:9px 14px;border-top:1px solid var(--line);vertical-align:top}
+.log tr:first-child td{border-top:0}
+.log td.t{font-family:var(--f-mono);color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.log td.who{white-space:nowrap;font-weight:500}
+.sev{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.sev.w{background:var(--signal)} .sev.i{background:var(--accent)} .sev.o{background:var(--ok)}
+.arch{display:flex;flex-direction:column;gap:8px}
+.layer{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 14px;display:grid;grid-template-columns:170px 1fr;gap:10px;align-items:center}
+.layer .name{font-family:var(--f-display);font-weight:600;font-size:14px}
+.layer .name small{display:block;font-family:var(--f-mono);font-weight:400;font-size:11px;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips span{font-size:12.5px;border:1px solid var(--line);border-radius:5px;padding:3px 8px;background:var(--bg)}
+.layer.ai{border-color:var(--accent)} .layer.ai .chips span{background:var(--accent-soft);border-color:transparent}
+.layer.sim{border-style:dashed}
+.arrow{text-align:center;font-family:var(--f-mono);font-size:11px;color:var(--muted)}
+.big{font-family:var(--f-display);font-size:clamp(30px,3.6vw,40px);font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums;line-height:1.1}
+.road{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));border-top:3px solid var(--accent)}
+.phase{padding:16px 18px 0 0;display:flex;flex-direction:column;gap:8px;position:relative}
+.phase::before{content:"";position:absolute;top:-9px;left:0;width:15px;height:15px;border-radius:50%;background:var(--bg);border:3px solid var(--accent)}
+.phase .when{font-family:var(--f-mono);font-size:12px;color:var(--muted);padding-top:6px}
+.nav{display:flex;align-items:center;gap:12px;border-top:1px solid var(--line);background:var(--panel);
+  padding-block:10px calc(10px + env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.nav button{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:6px;padding:7px 14px;cursor:pointer}
+.nav button:hover{border-color:var(--accent)}
+.nav button:focus-visible,.dots button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.nav button:disabled{opacity:.4;cursor:default}
+.dots{display:flex;gap:6px;flex:1;justify-content:center;flex-wrap:wrap}
+.dots button{width:9px;height:9px;padding:0;border-radius:50%;border:0;background:var(--line);cursor:pointer}
+.dots button[aria-current="true"]{background:var(--accent);width:22px;border-radius:5px}
+.count{font-family:var(--f-mono);font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:52px;text-align:right}
+@media (max-width:720px){.layer{grid-template-columns:1fr}}
+</style>
+
+<div class="app">
+<main class="stage" id="stage">
+
+<section class="slide cover" data-name="inicio" aria-label="Portada">
+  <div class="inner">
+    <div class="eyebrow">Desafío 2 · Anticiparse a los problemas antes de que ocurran</div>
+    <h1>Vigía<br><span>Anticipa la falla. Tú decides la acción.</span></h1>
+    <p class="lead">Un agente de IA que detecta una degradación antes de que afecte a los usuarios, encuentra la causa probable y recomienda qué hacer, con aprobación humana para todo lo riesgoso.</p>
+    <svg class="spark" viewBox="0 0 640 90" role="img" aria-label="Latencia en aumento con una alerta emitida antes del umbral de impacto">
+      <line x1="0" y1="24" x2="640" y2="24" stroke="var(--crit)" stroke-dasharray="5 5" stroke-width="1.5"/>
+      <text x="640" y="16" text-anchor="end" font-family="IBM Plex Mono,monospace" font-size="11" fill="var(--crit)">umbral de impacto</text>
+      <polyline fill="none" stroke="var(--accent)" stroke-width="2.5" points="0,74 40,73 80,75 120,72 160,74 200,73 240,72 280,68 320,62 360,56 400,50 430,46"/>
+      <polyline fill="none" stroke="var(--signal)" stroke-width="2.5" stroke-dasharray="4 5" opacity=".7" points="430,46 500,36 570,26"/>
+      <circle cx="430" cy="46" r="6" fill="var(--signal)"/>
+      <text x="442" y="64" font-family="IBM Plex Mono,monospace" font-size="11" fill="var(--muted)">Vigía alerta aquí</text>
+    </svg>
+    <div class="pulse"><span class="dot" aria-hidden="true"></span> Equipo [nombre del equipo] · Noviembre 2026</div>
+  </div>
+</section>
+
+<section class="slide" data-name="problema" aria-label="Problema" hidden>
+  <div class="inner">
+    <div class="eyebrow">El problema</div>
+    <h2>Nos enteramos de la falla cuando el cliente ya la sufre</h2>
+    <div class="grid g2">
+      <div class="box"><span class="tag sig">Hoy</span>
+        <ul class="clean muted"><li>La alerta llega cuando el servicio ya está degradado</li><li>Encontrar la causa exige revisar métricas, cambios, logs y tickets en herramientas distintas</li><li>La solución de un incidente anterior queda en un postmortem que pocos consultan</li></ul>
+      </div>
+      <div class="box"><span class="tag">Consecuencia</span>
+        <ul class="clean muted"><li>Retrabajos y pérdida de productividad</li><li>Mayor riesgo operativo</li><li>Impacto en la experiencia del cliente</li></ul>
+      </div>
+    </div>
+    <p class="quote">La información para anticipar la falla ya existe. Falta quien la cruce a tiempo.</p>
+  </div>
+</section>
+
+<section class="slide" data-name="solucion" aria-label="Solución" hidden>
+  <div class="inner">
+    <div class="eyebrow">La solución</div>
+    <h2>Un agente que investiga por el equipo y le presenta una decisión</h2>
+    <div class="grid g3">
+      <div class="box"><span class="tag">Detecta</span><h3>Antes del impacto</h3><p class="muted">Identifica la desviación y estima cuánto falta para que afecte a los usuarios.</p></div>
+      <div class="box"><span class="tag">Explica</span><h3>Con evidencia</h3><p class="muted">Cruza la señal con cambios recientes, logs e incidentes anteriores para proponer la causa probable.</p></div>
+      <div class="box"><span class="tag sig">Recomienda</span><h3>Y espera tu decisión</h3><p class="muted">Propone una acción preventiva concreta. Si es riesgosa, no hace nada hasta que una persona la aprueba.</p></div>
+    </div>
+    <p class="muted">Se acopla a los sistemas existentes en modo lectura. No los reemplaza ni los modifica.</p>
+  </div>
+</section>
+
+<section class="slide" data-name="flujo" aria-label="Cómo funciona" hidden>
+  <div class="inner">
+    <div class="eyebrow">Cómo funciona</div>
+    <h2>De la señal a la decisión</h2>
+    <div class="flow">
+      <div class="step"><h3>Señal</h3><p>Llega una alerta temprana del monitoreo.</p></div>
+      <div class="step"><h3>Confirma</h3><p>El agente revisa la métrica y proyecta la tendencia.</p></div>
+      <div class="step"><h3>Correlaciona</h3><p>Busca cambios recientes y errores en los logs.</p></div>
+      <div class="step"><h3>Recuerda</h3><p>Encuentra incidentes parecidos y su solución.</p></div>
+      <div class="step human"><h3>Propone</h3><p>Presenta la acción con su evidencia y espera aprobación.</p></div>
+      <div class="step"><h3>Verifica</h3><p>Tras ejecutar, comprueba que el servicio se recuperó.</p></div>
+    </div>
+    <p class="muted"><span class="tag sig">Paso humano</span> &nbsp;El modelo elige qué herramienta usar en cada paso; no sigue un guion fijo.</p>
+  </div>
+</section>
+
+<section class="slide" data-name="demo" aria-label="Demo" hidden>
+  <div class="inner">
+    <div class="eyebrow">Demo en vivo · escenario con datos de ejemplo</div>
+    <h2>Latencia creciente en Transferencias</h2>
+    <div class="log"><table>
+      <tr><td class="t">09:12:04</td><td class="who"><span class="sev w"></span>Detección</td><td>La latencia p95 pasó de 180 ms a 420 ms en 15 minutos. Cruce del umbral de 800 ms en unos 24 minutos.</td></tr>
+      <tr><td class="t">09:12:15</td><td class="who"><span class="sev i"></span>Cambios</td><td>CHG-4821, desplegado a las 08:55, redujo el pool de conexiones de pagos-core.</td></tr>
+      <tr><td class="t">09:12:21</td><td class="who"><span class="sev i"></span>Diagnóstico</td><td>312 errores de pool agotado en los logs. Dos incidentes anteriores con el mismo patrón, resueltos con rollback.</td></tr>
+      <tr><td class="t">09:12:41</td><td class="who"><span class="sev w"></span>Recomendación</td><td>Revertir CHG-4821. Riesgo alto: el agente se detiene y pide aprobación.</td></tr>
+      <tr><td class="t">09:14:05</td><td class="who"><span class="sev o"></span>Aprobación</td><td>El líder del servicio aprueba. La acción se ejecuta y queda registrada.</td></tr>
+      <tr><td class="t">09:19:02</td><td class="who"><span class="sev o"></span>Verificación</td><td>Latencia de vuelta en 184 ms, sin haber llegado al umbral de impacto.</td></tr>
+    </table></div>
+    <p class="muted">Menos de un minuto entre la señal y la recomendación. También se puede preguntar en la consola: «¿Qué cambios se desplegaron hoy?».</p>
+  </div>
+</section>
+
+<section class="slide" data-name="agente" aria-label="IA agéntica" hidden>
+  <div class="inner">
+    <div class="eyebrow">IA agéntica</div>
+    <h2>Qué hace el agente y qué no puede hacer</h2>
+    <div class="grid g2">
+      <div class="box"><span class="tag">Decide</span><h3>Qué investigar y en qué orden</h3><p class="muted">Tiene siete herramientas y elige cuál usar según lo que va encontrando. Cada llamada se ve en pantalla con sus parámetros.</p></div>
+      <div class="box"><span class="tag">Razona</span><h3>Solo con evidencia</h3><p class="muted">Cada afirmación sale del resultado de una herramienta y cita su fuente.</p></div>
+      <div class="box"><span class="tag sig">Se detiene</span><h3>Ante acciones riesgosas</h3><p class="muted">Solo puede proponer. La ejecución la hace el sistema después de la aprobación de una persona.</p></div>
+      <div class="box"><span class="tag">Responde</span><h3>Consultas en lenguaje natural</h3><p class="muted">El mismo agente contesta preguntas sobre el servicio, los cambios y los incidentes anteriores.</p></div>
+    </div>
+    <p class="mono muted" style="font-size:13px">consultar_metricas · detectar_anomalia · listar_cambios · buscar_logs · buscar_incidentes_similares · buscar_runbook · proponer_accion</p>
+  </div>
+</section>
+
+<section class="slide" data-name="arquitectura" aria-label="Arquitectura" hidden>
+  <div class="inner">
+    <div class="eyebrow">Arquitectura del MVP</div>
+    <h2>Qué construimos en estas 4 horas</h2>
+    <div class="arch">
+      <div class="layer"><div class="name">UI web<small>real</small></div><div class="chips"><span>Gráfico del servicio</span><span>Línea de tiempo del agente</span><span>Tarjeta de aprobación</span><span>Consola</span><span>Auditoría</span></div></div>
+      <div class="arrow">consultas y aprobaciones ↓ ↑ pasos del agente</div>
+      <div class="layer ai"><div class="name">Capa agéntica<small>real</small></div><div class="chips"><span>Agente con tool calling</span><span>7 herramientas</span><span>Tabla de riesgo</span><span>Pausa por aprobación</span><span>Registro de auditoría</span></div></div>
+      <div class="arrow">solo lectura ↓ ↑ datos</div>
+      <div class="layer sim"><div class="name">Integración<small>simulada en el MVP</small></div><div class="chips"><span>Métricas</span><span>Logs</span><span>Cambios</span><span>Incidentes</span><span>Runbooks</span></div></div>
+    </div>
+    <p class="muted">En la demo, los datos son archivos de ejemplo y la ejecución de la acción es simulada. En producción, cada herramienta apunta a la API del sistema que el banco ya usa; el agente y la UI no cambian.</p>
+  </div>
+</section>
+
+<section class="slide" data-name="impacto" aria-label="Impacto" hidden>
+  <div class="inner">
+    <div class="eyebrow">Impacto</div>
+    <h2>Qué cambia para Ingeniería y para el negocio</h2>
+    <div class="grid g4">
+      <div class="box"><span class="big">~24 min</span><h3>de anticipación</h3><p class="muted">Entre la alerta y el umbral de impacto, en el escenario de la demo.</p></div>
+      <div class="box"><span class="big">&lt; 1 min</span><h3>para el diagnóstico</h3><p class="muted">El agente cruza métricas, cambios, logs e historial sin intervención.</p></div>
+      <div class="box"><span class="big">1 archivo</span><h3>por servicio nuevo</h3><p class="muted">Cada tribu reutiliza el mismo agente con su propia configuración.</p></div>
+      <div class="box"><span class="big">0</span><h3>acciones riesgosas sin aprobación</h3><p class="muted">El control siempre queda en una persona.</p></div>
+    </div>
+    <div class="grid g3">
+      <div class="box"><span class="tag ok">Productividad</span><p class="muted">Menos tiempo investigando y menos retrabajo por cambios que fallan.</p></div>
+      <div class="box"><span class="tag ok">Riesgo operativo</span><p class="muted">Se actúa antes de que el problema llegue al cliente.</p></div>
+      <div class="box"><span class="tag ok">Servicio a los equipos</span><p class="muted">Respuestas rápidas y explicadas, con potencial de mejorar la percepción del servicio de TI.</p></div>
+    </div>
+    <p class="muted">Las cifras corresponden al escenario simulado. La reducción real de incidentes y de tiempos se medirá en el piloto, contra la línea base del banco.</p>
+  </div>
+</section>
+
+<section class="slide" data-name="confianza" aria-label="Control y seguridad" hidden>
+  <div class="inner">
+    <div class="eyebrow">Diseñado para un banco</div>
+    <h2>Autonomía con control</h2>
+    <div class="grid g2">
+      <div class="box"><h3>Solo lectura por defecto</h3><p class="muted">El agente consulta; no modifica los sistemas existentes.</p></div>
+      <div class="box"><h3>Humano en el circuito</h3><p class="muted">Las acciones de riesgo medio o alto requieren aprobación. El agente no puede aprobarse a sí mismo.</p></div>
+      <div class="box"><h3>Todo queda registrado</h3><p class="muted">Cada consulta, recomendación y decisión se guarda con su evidencia.</p></div>
+      <div class="box"><h3>Sin datos de clientes</h3><p class="muted">Trabaja con telemetría y metadatos operativos. La demo usa solo datos sintéticos.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-name="ruta" aria-label="Ruta a producción" hidden>
+  <div class="inner">
+    <div class="eyebrow">Factibilidad</div>
+    <h2>Implementable en seis meses, por etapas</h2>
+    <div class="road">
+      <div class="phase"><span class="when">Meses 1 y 2</span><h3>Modo sombra</h3><p class="muted">Conectores de lectura para un servicio. Se miden aciertos y falsas alarmas sin afectar la operación.</p></div>
+      <div class="phase"><span class="when">Meses 3 y 4</span><h3>Recomendación</h3><p class="muted">Los casos llegan al equipo dueño con su evidencia. Tickets y avisos automáticos.</p></div>
+      <div class="phase"><span class="when">Meses 5 y 6</span><h3>Ampliación</h3><p class="muted">De tres a cinco servicios de distintas tribus y primeras acciones con aprobación.</p></div>
+    </div>
+    <p class="muted">Requiere accesos de lectura a las fuentes, un modelo aprobado por el banco y la validación de seguridad.</p>
+  </div>
+</section>
+
+<section class="slide cover" data-name="cierre" aria-label="Cierre" hidden>
+  <div class="inner">
+    <div class="eyebrow">Cierre</div>
+    <h1>Menos incendios.<br><span>Más tiempo para construir.</span></h1>
+    <p class="lead">Vigía usa lo que el banco ya sabe de su operación para que los equipos actúen antes y no después.</p>
+    <p class="mono muted">Siguiente paso: piloto en modo sombra sobre un servicio.</p>
+  </div>
+</section>
+
+</main>
+
+<nav class="nav" aria-label="Navegación de diapositivas">
+  <button id="prev" type="button" aria-label="Diapositiva anterior">← Anterior</button>
+  <div class="dots" id="dots"></div>
+  <span class="count" id="count"></span>
+  <button id="next" type="button" aria-label="Diapositiva siguiente">Siguiente →</button>
+</nav>
+</div>
+
+<script>
+(function(){
+  var slides=[].slice.call(document.querySelectorAll('.slide'));
+  var dots=document.getElementById('dots'),count=document.getElementById('count');
+  var prev=document.getElementById('prev'),next=document.getElementById('next');
+  var cur=0;
+  slides.forEach(function(s,i){
+    var b=document.createElement('button');b.type='button';
+    b.setAttribute('aria-label','Ir a la diapositiva '+(i+1)+': '+s.getAttribute('aria-label'));
+    b.addEventListener('click',function(){go(i)});dots.appendChild(b);
+  });
+  function go(i,fromHash){
+    cur=Math.max(0,Math.min(slides.length-1,i));
+    slides.forEach(function(s,j){s.hidden=j!==cur});
+    [].forEach.call(dots.children,function(d,j){d.setAttribute('aria-current',j===cur?'true':'false')});
+    count.textContent=(cur+1)+' / '+slides.length;
+    prev.disabled=cur===0;next.disabled=cur===slides.length-1;
+    slides[cur].scrollTop=0;
+    if(!fromHash){var n='#'+slides[cur].dataset.name;if(location.hash!==n){try{history.replaceState(null,'',n)}catch(e){}}}
+  }
+  function fromHash(){
+    var h=location.hash.slice(1);
+    var i=slides.findIndex(function(s){return s.dataset.name===h});
+    go(i<0?0:i,true);
+  }
+  prev.addEventListener('click',function(){go(cur-1)});
+  next.addEventListener('click',function(){go(cur+1)});
+  document.addEventListener('keydown',function(e){
+    if(e.key==='ArrowRight'||e.key==='PageDown'||e.key===' '){e.preventDefault();go(cur+1)}
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();go(cur-1)}
+    else if(e.key==='Home'){go(0)} else if(e.key==='End'){go(slides.length-1)}
+  });
+  var sx=null,st=document.getElementById('stage');
+  st.addEventListener('touchstart',function(e){sx=e.touches[0].clientX},{passive:true});
+  st.addEventListener('touchend',function(e){
+    if(sx===null)return;var dx=e.changedTouches[0].clientX-sx;
+    if(Math.abs(dx)>60)go(cur+(dx<0?1:-1));sx=null;
+  });
+  window.addEventListener('hashchange',fromHash);
+  fromHash();
+})();
+</script>
+
+</body></html>

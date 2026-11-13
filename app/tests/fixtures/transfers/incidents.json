@@ -1,0 +1,133 @@
+{
+  "incidents": [
+    {
+      "id": "INC-3512",
+      "service": "pagos-core",
+      "title": "Connection pool exhausted after database pool_size reduction in pagos-core",
+      "symptoms": "Transferencias p95 latency climbing rapidly; pagos-core logs Connection pool exhausted waiting for pagos-db",
+      "root_cause": "Configuration deployment lowered DB connection pool_size below steady-state concurrency",
+      "resolution": "Rollback the pool configuration change to restore previous pool_size"
+    },
+    {
+      "id": "INC-3307",
+      "service": "pagos-core",
+      "title": "Latency spike in Transferencias caused by pagos-core connection pool saturation",
+      "symptoms": "Connection pool exhausted errors in pagos-core and elevated authorize latency in transferencias",
+      "root_cause": "Pool limit tuned down during maintenance release",
+      "resolution": "Immediate rollback of pool configuration change per RB-087"
+    },
+    {
+      "id": "INC-3490",
+      "service": "notificaciones",
+      "title": "SMTP relay rate limiting on outbound email notifications",
+      "symptoms": "421 Too many concurrent SMTP connections in notification worker",
+      "root_cause": "Bulk marketing campaign burst exceeded relay quota",
+      "resolution": "Enable exponential backoff and throttle batch worker concurrency"
+    },
+    {
+      "id": "INC-3475",
+      "service": "auth-gateway",
+      "title": "Expired TLS leaf certificate on internal OAuth token endpoint",
+      "symptoms": "SSLHandshakeException and 502 Bad Gateway on token introspection",
+      "root_cause": "Automated ACME certificate renewal hook failed due to DNS TXT propagation delay",
+      "resolution": "Rotate TLS certificate manually and restart ingress pods"
+    },
+    {
+      "id": "INC-3461",
+      "service": "ledger-sync",
+      "title": "Kafka consumer group lag growing on ledger.entries topic",
+      "symptoms": "Consumer lag above 50k messages and delayed balance updates",
+      "root_cause": "Poison pill message triggered repeated deserialization retries",
+      "resolution": "Route malformed payload to dead-letter topic and scale consumer replicas"
+    },
+    {
+      "id": "INC-3448",
+      "service": "fraud-scoring",
+      "title": "Redis cluster cache eviction storm causing model feature timeouts",
+      "symptoms": "Evicted_keys spike in Redis and fallback to cold scoring path",
+      "root_cause": "Unbounded session key TTL omitted in feature writer v2.4",
+      "resolution": "Apply TTL patch and flush stale prefix keys"
+    },
+    {
+      "id": "INC-3422",
+      "service": "transferencias",
+      "title": "DNS lookup timeouts resolving external SWIFT gateway",
+      "symptoms": "UnknownHostException on outbound settlement calls",
+      "root_cause": "CoreDNS node-local cache pod evicted under memory pressure",
+      "resolution": "Reschedule CoreDNS pods with higher memory limit"
+    },
+    {
+      "id": "INC-3405",
+      "service": "accounts-read",
+      "title": "PostgreSQL sequential scan regression after missing composite index",
+      "symptoms": "High CPU on read replica and slow account statement queries",
+      "root_cause": "Migration dropped index idx_movements_account_date",
+      "resolution": "Recreate index concurrently on primary"
+    },
+    {
+      "id": "INC-3391",
+      "service": "cards-api",
+      "title": "JVM OldGen GC pause spikes in card tokenization service",
+      "symptoms": "Stop-the-world GC pauses > 4s every 2 minutes",
+      "root_cause": "Large audit payload buffered in heap before compression",
+      "resolution": "Stream audit payloads and increase heap headroom"
+    },
+    {
+      "id": "INC-3374",
+      "service": "onboarding-kyc",
+      "title": "Third-party biometric vendor HTTP 429 throttling",
+      "symptoms": "Document verification failures during onboarding peak",
+      "root_cause": "Missing client-side token bucket rate limiter",
+      "resolution": "Enable circuit breaker and queue non-urgent verifications"
+    },
+    {
+      "id": "INC-3350",
+      "service": "webhooks-dispatcher",
+      "title": "Thread pool starvation from unconfigured HTTP client read timeouts",
+      "symptoms": "Worker threads blocked indefinitely on slow merchant callback URLs",
+      "root_cause": "Default infinite socket timeout on webhook client",
+      "resolution": "Enforce 3-second connect and 5-second read timeout"
+    },
+    {
+      "id": "INC-3332",
+      "service": "qr-payments",
+      "title": "Clock skew across Kubernetes nodes broke HMAC signature validation",
+      "symptoms": "401 Unauthorized on valid QR payment callbacks",
+      "root_cause": "NTP daemon stopped on two worker nodes",
+      "resolution": "Restart chronyd and drain affected nodes"
+    },
+    {
+      "id": "INC-3318",
+      "service": "fx-rates",
+      "title": "Stale exchange rate feed due to SFTP credential rotation",
+      "symptoms": "Alert on rate freshness older than 30 minutes",
+      "root_cause": "Provider rotated SSH key without updating secret store",
+      "resolution": "Update SSH public key in Vault and trigger manual sync"
+    },
+    {
+      "id": "INC-3295",
+      "service": "audit-collector",
+      "title": "Disk full on log forwarder buffer volume",
+      "symptoms": "Log shipping stalled and FluentBit backpressure warnings",
+      "root_cause": "Debug logging accidentally enabled in production",
+      "resolution": "Revert log level to INFO and expand buffer PVC"
+    },
+    {
+      "id": "INC-3280",
+      "service": "mobile-bff",
+      "title": "Brotli compression CPU saturation on gateway ingress",
+      "symptoms": "Ingress pod CPU throttling and slow static JSON responses",
+      "root_cause": "Compression level bumped to 11 on dynamic API routes",
+      "resolution": "Restore compression level 4"
+    },
+    {
+      "id": "INC-3264",
+      "service": "batch-settlement",
+      "title": "Deadlock on concurrent end-of-day batch reconciliation jobs",
+      "symptoms": "SQLSTATE 40P01 deadlock detected in settlement table",
+      "root_cause": "Two cron schedules overlapped after timezone DST change",
+      "resolution": "Acquire advisory lock and stagger cron schedule"
+    }
+  ]
+}
+

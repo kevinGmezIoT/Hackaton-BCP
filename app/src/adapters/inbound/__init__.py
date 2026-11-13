@@ -1,0 +1,2 @@
+"""Inbound adapters package."""
+
