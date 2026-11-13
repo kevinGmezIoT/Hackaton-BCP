@@ -16,6 +16,30 @@ from vigia.adapters.outbound.telemetry import CsvTelemetryAdapter
 from vigia.domain.contracts import ConnectorStatus, RelationType
 
 
+def test_v1_metrics_selects_mapped_service_and_keeps_domain_identity(transfers_workspace):
+    catalog = YamlServiceCatalogAdapter.from_yaml(transfers_workspace.fixtures_dir / "services.yaml")
+    cutoff = datetime.fromisoformat("2026-11-12T09:12:00-05:00")
+    requests = []
+    def http_get(url, params, headers):
+        requests.append((url, params))
+        return 200, {"version": 1, "servicios": [
+            {"servicio": "otro_servicio", "puntos": [[cutoff.isoformat(), 999]]},
+            {"servicio": "consulta_estado_cuenta", "unidad": "ms",
+             "puntos": [[cutoff.isoformat(), 211]]},
+        ]}
+    adapter = RestTelemetryApiAdapter(
+        catalog, metrics_url="http://server:8009/api/v1/metricas",
+        metrics_service_map={"transferencias": "consulta_estado_cuenta"}, http_get=http_get)
+    series = adapter.query_metrics("Transferencias", "production", "latency_p95_ms", 1, cutoff)
+    assert series.status == ConnectorStatus.OK
+    assert series.service == "transferencias" and series.current_value == 211
+    assert requests[0] == ("http://server:8009/api/v1/metricas",
+                            {"servicio": "consulta_estado_cuenta", "minutos": "1"})
+    unmapped = adapter.query_metrics("pagos-core", "production", "latency_p95_ms", 1, cutoff)
+    assert unmapped.status == ConnectorStatus.NO_RESULTS
+    assert not unmapped.points
+
+
 def test_git_adapter_reads_deployed_diff_and_enforces_boundaries(
     transfers_workspace: TransfersWorkspace,
 ) -> None:

@@ -50,6 +50,7 @@ class PilotRuntimeConfig:
     prometheus_url: str | None = None
     loki_url: str | None = None
     metrics_api_url: str | None = None
+    metrics_service_map: dict[str, str] = field(default_factory=dict)
     logs_api_url: str | None = None
     github_api_url: str | None = None
     github_service_repos: dict[str, str] = field(default_factory=dict)
@@ -183,6 +184,7 @@ def build_pilot_case_service(
         telemetry = RestTelemetryApiAdapter(
             catalog,
             metrics_url=config.metrics_api_url,
+            metrics_service_map=config.metrics_service_map,
             logs_url=config.logs_api_url,
             auth_token=telemetry_token,
             http_get=config.http_get,

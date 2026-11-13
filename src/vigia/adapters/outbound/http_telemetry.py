@@ -675,6 +675,7 @@ class RestTelemetryApiAdapter:
         http_get: HttpGetFn | None = None,
         max_retries_per_case: int = 2,
         log_limit: int = 500,
+        metrics_service_map: dict[str, str] | None = None,
     ) -> None:
         self._catalog = catalog
         self._metrics_url = _normalize_rest_endpoint(metrics_url, "/api/metricas")
@@ -685,6 +686,7 @@ class RestTelemetryApiAdapter:
             max_retries_per_case=max_retries_per_case,
         )
         self._log_limit = max(1, log_limit)
+        self._metrics_service_map = {k.lower(): v for k, v in (metrics_service_map or {}).items()}
 
     def query_metrics(
         self,
@@ -730,7 +732,8 @@ class RestTelemetryApiAdapter:
             )
 
         requested_minutes = max(1, min(window_minutes, 60))
-        params = {"servicio": canonical, "minutos": str(requested_minutes)}
+        api_service = self._metrics_service_map.get(canonical.lower(), canonical)
+        params = {"servicio": api_service, "minutos": str(requested_minutes)}
         query_ref = f"{self._metrics_url}?{urllib.parse.urlencode(params)}"
         code, payload = self._client.get_json(self._metrics_url, params)
         duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -765,6 +768,12 @@ class RestTelemetryApiAdapter:
                 note=str(err_msg),
             )
 
+        if isinstance(payload.get("servicios"), list):
+            payload = next(
+                (item for item in payload["servicios"] if isinstance(item, dict)
+                 and str(item.get("servicio", "")).lower() == api_service.lower()),
+                {},
+            )
         resolved_unit = str(payload.get("unidad") or unit)
         raw_points = payload.get("puntos", [])
         points: list[MetricPoint] = []

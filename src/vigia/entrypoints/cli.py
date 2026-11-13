@@ -467,6 +467,7 @@ def _build_runtime_config(
         prometheus_url=prom_url,
         loki_url=loki_url,
         metrics_api_url=metrics_api_url,
+        metrics_service_map=_parse_key_value_pairs(None, os.environ.get("VIGIA_METRICS_SERVICE_MAP")),
         logs_api_url=logs_api_url,
         github_api_url=github_api_url,
         github_service_repos=github_repos,

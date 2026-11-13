@@ -12,6 +12,8 @@ El frontend y su puente conservan el contrato de `FrontendHackatonCIO/api/README
 
 El equipo configura las IP de red que sean accesibles entre ambas máquinas. `localhost` hace referencia a la propia máquina de cada proceso. El token permanece en los servidores. El puerto 8000 del puente y el 8001 de Vigía son ejemplos configurables. Para conservar el expediente y la posición de entrega, configurar `VIGIA_DB_PATH` con una ruta persistente.
 
+Para la fuente REST v1 de métricas, configurar `VIGIA_METRICS_API_URL=http://10.233.43.117:8009/api/v1/metricas` y `VIGIA_METRICS_SERVICE_MAP=transferencias=consulta_estado_cuenta`. El adaptador consulta ese nombre externo y extrae su entrada dentro de `servicios`. La ventana `minutos` procede de la herramienta que consulta las métricas. Las respuestas antiguas con `puntos` directamente en el objeto también son compatibles.
+
 En Vigía se mantienen las rutas de callback `/chat`, `/investigar` y `/decision`, que el puente ya usa. Sus equivalentes de configuración son `VIGIA_BRIDGE_CHAT_PATH`, `VIGIA_BRIDGE_INVESTIGATE_PATH` y `VIGIA_BRIDGE_NOTIFY_PATH`. Conservar esos valores cuando se use el frontend original. `VIGIA_BRIDGE_SERVICE` permite fijar el servicio al que se refieren las preguntas del chat. `VIGIA_BRIDGE_UTC_OFFSET=-05:00` presenta las marcas del agente en hora de Lima.
 
 ## Compatibilidad implementada en el agente
