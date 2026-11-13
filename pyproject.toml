@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vigia"
+version = "0.1.0"
+description = "Vigía production failure prevention agent (Alternative A: tool-calling investigator)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=1.5.0",
+    "langchain-core>=1.8.0",
+    "langchain-google-genai>=4.5.0",
+    "pydantic>=2.10.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+vigia = "vigia.entrypoints.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vigia = [
+    "demo/*.yaml",
+    "demo/*.csv",
+    "demo/*.txt",
+    "demo/*.json",
+    "demo/docs/*.drawio",
+    "demo/runbooks/*.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
