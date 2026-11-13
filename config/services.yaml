@@ -1,0 +1,39 @@
+# Servicio del piloto. Los alias admiten las llamadas de la UI existente.
+services:
+- service: consulta_estado_cuenta
+  aliases:
+  - Consulta Estado de Cuenta
+  - consulta-estado-cuenta
+  - transferencias
+  - Transferencias
+  - transferencias-api
+  - transfers
+  environment: production
+  repository: JoseGarayRios/hackaton
+  release_source: github
+  architecture:
+    path: consulta_estado_cuenta.drawio
+    revision_mode: from_release
+  telemetry:
+    service_selector: consulta_estado_cuenta
+    environment_selector: production
+    metric_unit: ms
+    version_label: cohort
+    impact_metric: latency_p95_ms
+    baseline_ms: 180.0
+  threshold_ms: 800.0
+  owner_team: platform
+  approver_group: oncall-approvers
+  runbooks_path: runbooks
+  config_version: v2-pilot
+  allowed_actions:
+  - create_preventive_ticket
+  - notify_team
+  - scale_capacity
+  - rollback_change
+  recovery_criteria:
+    healthy_band_max_ms: 220.0
+    min_request_volume: 50
+    min_coverage: 0.8
+    consecutive_healthy_windows: 1
+    error_rate_tolerance: 0.01

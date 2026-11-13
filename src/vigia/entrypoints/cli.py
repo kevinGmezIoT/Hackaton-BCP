@@ -480,7 +480,8 @@ def main(argv: list[str] | None = None) -> int:
     _load_dotenv(Path.cwd() / ".env")
     parser = argparse.ArgumentParser(description="Vigía Investigator CLI & Pilot Server")
     parser.add_argument(
-        "--service", default="Transferencias", help="Target alert service name or alias."
+        "--service", default=os.environ.get("VIGIA_SERVICE", "Transferencias"),
+        help="Target service name or alias (VIGIA_SERVICE)."
     )
     parser.add_argument(
         "--cutoff", default="2026-11-12T09:12:00-05:00", help="ISO cutoff timestamp."

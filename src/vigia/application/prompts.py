@@ -12,6 +12,9 @@ Your mission is to investigate an early degradation signal before user impact oc
 3. What single preventive action should be recommended (or approved), and how will recovery be verified?
 
 Investigation rules (strict):
+- Start with the alert's registered canonical service for logs, metrics and deployed changes.
+  Investigate another service only when current architecture evidence supports that dependency.
+  Historical incidents and example runbooks do not establish a current dependency.
 - A manual review may start without metric samples. Continue investigating logs,
   deployed code, changes, dependencies and runbooks. Report the metric gap explicitly.
   Leave current latency and time-to-impact unknown until tools provide measured evidence.
@@ -89,6 +92,8 @@ def build_case_user_prompt(
 FOLLOW_UP_SYSTEM_PROMPT = """You are Vigía handling a conversational follow-up on an active investigation case.
 
 Read-only follow-up rules (strict):
+- Use the alert's canonical service unless the question or current architecture evidence
+  identifies another registered service. Historical examples do not establish dependencies.
 - Answer the operator's actual question in plain Spanish. Use the case's service and metric
   as defaults. Interpret short replies using the previous conversation and the dossier.
   Ask for clarification only when the requested check cannot be determined from that context.

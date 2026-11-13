@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from conftest import TransfersWorkspace
 
@@ -14,6 +15,61 @@ from vigia.adapters.outbound.local_git import JsonReleaseSourceAdapter, LocalGit
 from vigia.adapters.outbound.service_catalog import YamlServiceCatalogAdapter
 from vigia.adapters.outbound.telemetry import CsvTelemetryAdapter
 from vigia.domain.contracts import ConnectorStatus, RelationType
+
+
+def test_account_statement_is_canonical_in_pilot_catalog():
+    root = Path(__file__).resolve().parents[1]
+    catalog = YamlServiceCatalogAdapter.from_yaml(root / "config/services.yaml")
+    canonical = catalog.get_service("consulta_estado_cuenta")
+    assert canonical.service == "consulta_estado_cuenta"
+    assert catalog.get_service("transferencias").service == "consulta_estado_cuenta"
+    assert canonical.telemetry.service_selector == "consulta_estado_cuenta"
+    assert [svc.service for svc in catalog.list_services()] == ["consulta_estado_cuenta"]
+    assert catalog.get_service("pagos-core") is None
+    seen = []
+    def http_get(url, params, headers):
+        seen.append(params)
+        return 200, {"servicios": [{"servicio": "consulta_estado_cuenta", "puntos": []}]}
+    adapter = RestTelemetryApiAdapter(
+        catalog, metrics_url="http://metrics/api/v1/metricas", http_get=http_get)
+    series = adapter.query_metrics("transferencias", "production", "latency_p95_ms", 1,
+                                   datetime.fromisoformat("2026-11-13T12:00:00-05:00"))
+    assert seen == [{"servicio": "consulta_estado_cuenta", "minutos": "1"}]
+    assert series.service == "consulta_estado_cuenta"
+
+
+def test_pilot_runtime_uses_its_own_architecture_and_rejects_legacy_service():
+    from vigia.runtime import PilotRuntimeConfig, build_pilot_case_service
+
+    root = Path(__file__).resolve().parents[1]
+    calls = []
+
+    def http_get(url, params, headers):
+        calls.append((url, params))
+        return 200, []
+
+    service, _, _ = build_pilot_case_service(
+        PilotRuntimeConfig(
+            catalog_path=root / "config/services.yaml", fixtures_dir=root / "src/vigia/demo",
+            incidents_path=root / "config/incidents.json", runbooks_dir=root / "config/runbooks",
+            logs_api_url="http://logs/api/logs", http_get=http_get,
+        ), model="unused",
+    )
+    try:
+        dependencies = service._deps.architecture.query_dependencies("consulta_estado_cuenta", "production")
+        assert dependencies.status == ConnectorStatus.NO_RESULTS
+        assert dependencies.relations == []
+        assert "consulta_estado_cuenta.drawio" in dependencies.note
+        assert service._deps.knowledge.search_similar_incidents("pagos-core pool exhausted") == []
+        assert service._deps.knowledge.search_runbook("pool rollback") == []
+        cutoff = datetime.fromisoformat("2026-11-13T20:14:00+00:00")
+        result = service._deps.telemetry.search_logs("pagos-core", "production", "*", 60, cutoff)
+        assert result.status == ConnectorStatus.UNAUTHORIZED
+        assert calls == []
+        service._deps.telemetry.search_logs("consulta_estado_cuenta", "production", "*", 60, cutoff)
+        assert calls == [("http://logs/api/logs", {"servicio": "consulta_estado_cuenta", "limite": "500"})]
+    finally:
+        service.close()
 
 
 def test_v1_metrics_selects_mapped_service_and_keeps_domain_identity(transfers_workspace):

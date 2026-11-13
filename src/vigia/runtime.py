@@ -227,10 +227,14 @@ def build_pilot_case_service(
         )
         code_repo = LocalGitRepositoryAdapter(config.authorized_repos)
 
-    diagram_paths = {
-        svc.service: base_dir / svc.architecture.path
-        for svc in catalog.list_services()
-    }
+    # Explicit catalogs own their relative architecture assets. Retain fixture
+    # resolution for existing catalogs whose diagrams still live in fixtures_dir.
+    diagram_paths = {}
+    for svc in catalog.list_services():
+        catalog_diagram = catalog_path.parent / svc.architecture.path
+        diagram_paths[svc.service] = (
+            catalog_diagram if catalog_diagram.exists() else base_dir / svc.architecture.path
+        )
     architecture = DrawioArchitectureAdapter(
         diagram_paths,
         catalog,

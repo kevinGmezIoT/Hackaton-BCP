@@ -424,6 +424,8 @@ class MetricPoint(BaseModel):
     cohort: str | None = None
     request_count: int | None = None
     error_count: int | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
 
 
 class MetricSeries(BaseModel):

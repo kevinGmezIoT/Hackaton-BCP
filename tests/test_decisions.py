@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from conftest import ScriptedChatModel, TransfersWorkspace
@@ -17,10 +17,42 @@ from vigia.domain.contracts import (
     CaseRecord,
     CaseStatus,
     DecisionChoice,
+    MetricPoint,
+    MetricSeries,
     ProposalStatus,
     RiskLevel,
 )
 from vigia.runtime import build_case_service
+
+
+@pytest.mark.parametrize("intervals,errors,expected_healthy,recovered", [
+    ([(-0.5, 0.5), (0.5, 1.5)], 0, 1, False),
+    ([(0, 1), (2, 3)], 0, 1, False),
+    ([(0, 1), (1, 2)], 0, 2, True),
+    ([(0, 1), (1, 2)], 100, 2, False),
+])
+def test_historical_recovery_requires_wholly_post_action_contiguous_clean_intervals(
+    transfers_workspace, monkeypatch, intervals, errors, expected_healthy, recovered,
+):
+    service, case, _ = _run_investigator_to_proposal(transfers_workspace)
+    action_at = case.alert.cutoff_at
+    service._deps.catalog.get_service(case.alert.service).recovery_criteria.consecutive_healthy_windows = 2
+    points = [MetricPoint(
+        timestamp=action_at + timedelta(minutes=end), value=184,
+        window_start=action_at + timedelta(minutes=start),
+        window_end=action_at + timedelta(minutes=end), request_count=100, error_count=0,
+    ) for start, end in intervals]
+    series = MetricSeries(
+        service=case.alert.service, environment="production", metric="latency_p95_ms",
+        window_start=action_at - timedelta(minutes=1), window_end=action_at + timedelta(minutes=4),
+        reproducible_query="http://metrics/api/v1/metricas/historico.txt", points=points,
+        request_volume=200, error_total=errors, current_value=184, coverage=1,
+    )
+    monkeypatch.setattr(service._deps.telemetry, "query_metrics", lambda **kwargs: series)
+    result = service._verify_recovery(case, action_at=action_at,
+                                      verification_at=action_at + timedelta(minutes=4))
+    assert result.consecutive_healthy_points == expected_healthy
+    assert result.recovered is recovered
 
 
 def _run_investigator_to_proposal(

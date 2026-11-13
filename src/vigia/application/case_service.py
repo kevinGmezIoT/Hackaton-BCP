@@ -791,7 +791,10 @@ class CaseService:
             allow_post_action=True,
         )
 
-        post_points = [p for p in series.points if p.timestamp > action_at]
+        post_points = [
+            p for p in series.points if p.timestamp > action_at
+            and (p.window_start is None or p.window_start >= action_at)
+        ]
         pre_points = [p for p in series.points if p.timestamp <= action_at]
         pre_action_value = (
             case.alert.current_value
@@ -819,12 +822,19 @@ class CaseService:
             bool(post_points) and all(p.error_count is not None for p in post_points)
         )
         consecutive_healthy = 0
+        previous_interval_end = None
         for pt in post_points:
+            if (
+                pt.window_start is not None and previous_interval_end is not None
+                and pt.window_start != previous_interval_end
+            ):
+                consecutive_healthy = 0
             improved_pt = pre_action_value is None or pt.value < pre_action_value
             if pt.value < threshold and pt.value <= criteria.healthy_band_max_ms and improved_pt:
                 consecutive_healthy += 1
             else:
                 consecutive_healthy = 0
+            previous_interval_end = pt.window_end
 
         if series.status != ConnectorStatus.OK or not post_points:
             recovered = False
@@ -846,6 +856,18 @@ class CaseService:
                 and error_total_known
             )
             meets_dep_errors = dep_errors_after == 0
+            post_errors = (
+                sum(p.error_count for p in post_points)
+                if all(p.error_count is not None for p in post_points) else series.error_total
+            )
+            # Also account for failed intervals without a measured p95. The wider
+            # window total is conservative until a fully post-action window is available.
+            if series.error_total is not None and all(p.window_start is not None for p in series.points):
+                post_errors = max(post_errors or 0, series.error_total)
+            meets_error_rate = (
+                post_errors is not None and post_volume is not None and post_volume > 0
+                and post_errors / post_volume <= criteria.error_rate_tolerance
+            )
 
             if (
                 post_value < threshold
@@ -854,6 +876,7 @@ class CaseService:
                 and meets_consecutive
                 and meets_traffic
                 and meets_dep_errors
+                and meets_error_rate
             ):
                 recovered = True
                 case.status = CaseStatus.CLOSED
@@ -883,6 +906,8 @@ class CaseService:
                     )
                 if not meets_dep_errors:
                     reasons.append(f"dependency still reports {dep_errors_after} post-action error(s)")
+                if not meets_error_rate:
+                    reasons.append("post-action error rate is unknown or exceeds the configured tolerance")
                 detail = (
                     f"Case remains in observation at {latest_post.timestamp.isoformat()}: "
                     + ("; ".join(reasons) if reasons else "awaiting sustained confirmation.")

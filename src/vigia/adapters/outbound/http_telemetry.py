@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import urllib.error
 import urllib.parse
@@ -83,6 +84,7 @@ def _finalize_metric_series(
     duration_ms: float,
     step_seconds: int = 60,
     notes: list[str] | None = None,
+    coverage: float | None = None,
 ) -> MetricSeries:
     expected_buckets = max(1, int((cutoff_at - window_start).total_seconds() // step_seconds) + 1)
     observed_buckets = len({int(p.timestamp.timestamp() // step_seconds) for p in points})
@@ -99,7 +101,7 @@ def _finalize_metric_series(
         window_start=window_start,
         window_end=cutoff_at,
         reproducible_query=query_ref,
-        coverage=temporal_coverage,
+        coverage=temporal_coverage if coverage is None else coverage,
         points=points,
         current_value=current_val,
         value_15m_ago=closest_15m.value,
@@ -730,11 +732,20 @@ class RestTelemetryApiAdapter:
                 coverage=0.0,
                 note="Metrics API URL is not configured.",
             )
+        if metric != svc_cfg.telemetry.impact_metric:
+            return MetricSeries(
+                status=ConnectorStatus.NO_RESULTS, service=canonical, environment=environment,
+                metric=metric, unit=unit, window_start=window_start, window_end=cutoff_at,
+                reproducible_query=self._metrics_url, coverage=0.0,
+                note=f"The REST latency endpoint does not provide metric '{metric}'.",
+            )
 
         requested_minutes = max(1, min(window_minutes, 60))
         api_service = self._metrics_service_map.get(canonical.lower(), canonical)
-        params = {"servicio": api_service, "minutos": str(requested_minutes)}
-        query_ref = f"{self._metrics_url}?{urllib.parse.urlencode(params)}"
+        # The historical export contains every service; selection and windowing are local.
+        historical_export = urllib.parse.urlparse(self._metrics_url).path.endswith("/historico.txt")
+        params = {} if historical_export else {"servicio": api_service, "minutos": str(requested_minutes)}
+        query_ref = self._metrics_url + (f"?{urllib.parse.urlencode(params)}" if params else "")
         code, payload = self._client.get_json(self._metrics_url, params)
         duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
 
@@ -776,6 +787,12 @@ class RestTelemetryApiAdapter:
             )
         resolved_unit = str(payload.get("unidad") or unit)
         raw_points = payload.get("puntos", [])
+        if isinstance(raw_points, list) and any(isinstance(item, dict) for item in raw_points):
+            return self._historical_series(
+                raw_points, canonical=canonical, environment=environment, metric=metric,
+                unit=resolved_unit, window_start=window_start, cutoff_at=cutoff_at,
+                query_ref=query_ref, duration_ms=duration_ms,
+            )
         points: list[MetricPoint] = []
         if isinstance(raw_points, list):
             for item in raw_points:
@@ -818,6 +835,82 @@ class RestTelemetryApiAdapter:
             error_total=error_total,
             duration_ms=duration_ms,
         )
+
+    def _historical_series(
+        self, raw_points: list, *, canonical: str, environment: str, metric: str, unit: str,
+        window_start: datetime, cutoff_at: datetime, query_ref: str, duration_ms: float,
+    ) -> MetricSeries:
+        """Read complete buckets available at the case cutoff, preserving their measurement interval."""
+        points: list[MetricPoint] = []
+        intervals: set[tuple[datetime, datetime]] = set()
+        requests: list[int | None] = []
+        errors: list[int | None] = []
+        invalid = 0
+        for item in raw_points:
+            if not isinstance(item, dict):
+                invalid += 1
+                continue
+            try:
+                start = _parse_telemetry_timestamp(item["desde_utc"], cutoff_at.tzinfo)
+                end = _parse_telemetry_timestamp(item["hasta_utc"], cutoff_at.tzinfo)
+                if end <= start:
+                    raise ValueError("Invalid measurement interval")
+                if start < window_start or end > cutoff_at or (start, end) in intervals:
+                    continue
+                request_count = item.get("peticiones")
+                error_count = item.get("errores")
+                if any(value is not None and (type(value) is not int or value < 0)
+                       for value in (request_count, error_count)):
+                    raise ValueError("Invalid counters")
+                if request_count is not None and error_count is not None and error_count > request_count:
+                    raise ValueError("Errors exceed request count")
+                value = item.get("latencia_p95_ms")
+                if value is not None:
+                    value = float(value)
+                    if not math.isfinite(value) or value < 0:
+                        raise ValueError("Invalid latency")
+            except (KeyError, TypeError, ValueError, OverflowError):
+                invalid += 1
+                continue
+            intervals.add((start, end))
+            requests.append(request_count)
+            errors.append(error_count)
+            if value is not None and request_count != 0:
+                points.append(MetricPoint(
+                    timestamp=end, value=value, request_count=request_count, error_count=error_count,
+                    window_start=start, window_end=end,
+                ))
+        points.sort(key=lambda point: point.timestamp)
+        request_volume = sum(requests) if requests and all(v is not None for v in requests) else None
+        error_total = sum(errors) if errors and all(v is not None for v in errors) else None
+        # Coverage is the union of measured intervals. Gaps and overlaps retain their actual duration.
+        measured_seconds = 0.0
+        previous_end = window_start
+        for point in sorted(points, key=lambda point: point.window_start):
+            start = max(previous_end, point.window_start)
+            measured_seconds += max(0, (point.window_end - start).total_seconds())
+            previous_end = max(previous_end, point.window_end)
+        coverage = min(1.0, measured_seconds / max(1, (cutoff_at - window_start).total_seconds()))
+        notes = ["Historical p95 buckets are timestamped at hasta_utc. Only complete intervals are included."]
+        if invalid:
+            notes.append(f"Ignored {invalid} invalid interval(s).")
+        if not points:
+            return MetricSeries(
+                status=ConnectorStatus.NO_RESULTS, service=canonical, environment=environment,
+                metric=metric, unit=unit, window_start=window_start, window_end=cutoff_at,
+                reproducible_query=query_ref, coverage=0.0, request_volume=request_volume,
+                error_total=error_total, duration_ms=duration_ms,
+                note="No measured latency in complete intervals of the requested window. " + " ".join(notes),
+            )
+        series = _finalize_metric_series(
+            canonical=canonical, environment=environment, metric=metric, unit=unit,
+            window_start=window_start, cutoff_at=cutoff_at, query_ref=query_ref, points=points,
+            request_volume=request_volume, error_total=error_total, duration_ms=duration_ms,
+            coverage=round(coverage, 4), notes=notes,
+        )
+        ref_target = cutoff_at - timedelta(minutes=15)
+        reference = next((p.value for p in points if p.window_start < ref_target <= p.window_end), None)
+        return series.model_copy(update={"value_15m_ago": reference})
 
     def detect_anomaly(
         self,
