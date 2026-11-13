@@ -29,19 +29,25 @@ uv run pytest -v
 
 ## Running the CLI
 
-### Offline Synthetic Demo (`--demo-offline`)
+### Offline Synthetic Demo & Pilot Modes
 
 Reproduces the `Transferencias` -> `pagos-core` timeout incident end-to-end without calling an external LLM API, using packaged resources from `vigia.demo`:
 
 ```powershell
-# Approve the proposed rollback -> simulated execution -> post-rollback recovery verification (184 ms)
+# Demo profile (assisted mode): approve rollback -> simulated execution -> recovery verification (184 ms)
 uv run vigia --demo-offline --decision approve
 
-# Reject the proposed rollback -> preventive ticket opened -> case closed as rejected
+# Demo profile (assisted mode): reject rollback -> preventive ticket opened -> case open
 uv run vigia --demo-offline --decision reject
 
-# Interactive confirmation prompt
-uv run vigia --demo-offline
+# Pilot profile (shadow mode): read-only investigation -> recommendation saved without external writes
+uv run vigia --profile pilot --mode shadow --demo-offline
+
+# Service onboarding connectivity probe (Transferencias -> pagos-core)
+uv run vigia --profile pilot --probe-service --service Transferencias
+
+# Start local Pilot HTTP/SSE API & Console server
+uv run vigia --profile pilot --mode shadow --serve --port 8000
 ```
 
 ### Live LLM Mode (`--model`)

@@ -18,6 +18,53 @@ class ConnectorStatus(str, Enum):
     UNAUTHORIZED = "unauthorized"
 
 
+class OperationalMode(str, Enum):
+    """Execution mode controlling whether Vigía only recommends (shadow) or dispatches actions (assisted)."""
+
+    SHADOW = "shadow"
+    ASSISTED = "assisted"
+
+
+class RuntimeProfile(str, Enum):
+    """Runtime composition profile."""
+
+    DEMO = "demo"
+    PILOT = "pilot"
+
+
+class AlertState(str, Enum):
+    """Monitor alert state in an incoming envelope."""
+
+    FIRING = "firing"
+    RESOLVED = "resolved"
+
+
+class AlertIngestOutcome(str, Enum):
+    """Result of ingesting an alert envelope into the case store."""
+
+    CREATED = "created"
+    MERGED = "merged"
+    DUPLICATE = "duplicate"
+    RESOLVED_RECORDED = "resolved_recorded"
+
+
+class ReviewVerdict(str, Enum):
+    """Human evaluation of a shadow recommendation."""
+
+    USEFUL = "useful"
+    INCORRECT = "incorrect"
+    INDETERMINATE = "indeterminate"
+
+
+class OperationStatus(str, Enum):
+    """Lifecycle status of an external pipeline or ticketing operation."""
+
+    PENDING = "pending"
+    EXECUTED = "executed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+
+
 class ActionType(str, Enum):
     """Preventive actions that may be proposed or executed."""
 
@@ -39,9 +86,39 @@ class ProposalStatus(str, Enum):
     """Lifecycle state of an action proposal."""
 
     PENDING = "pending"
+    RECOMMENDED = "recommended"
+    UNDER_REVIEW = "under_review"
+    WITHDRAWN = "withdrawn"
     APPROVED = "approved"
     REJECTED = "rejected"
     EXECUTED = "executed"
+    FAILED = "failed"
+
+
+class ConversationIntent(str, Enum):
+    """Structured intent classified from an operator chat message."""
+
+    EXPLAIN_PROPOSAL = "explain_proposal"
+    CHALLENGE_HYPOTHESIS = "challenge_hypothesis"
+    CURRENT_STATUS = "current_status"
+    APPROVAL_REQUEST = "approval_request"
+    AMBIGUOUS = "ambiguous"
+
+
+class ComparisonVerdict(str, Enum):
+    """Outcome of comparing pre/post-deployment error rates across cohorts."""
+
+    SUPPORTS_CAUSAL_CHANGE = "supports_causal_change"
+    CONTRADICTS_DEPLOYMENT = "contradicts_deployment"
+    INDETERMINATE = "indeterminate"
+
+
+class TurnStatus(str, Enum):
+    """Execution lifecycle status of a conversational investigation turn."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
     FAILED = "failed"
 
 
@@ -57,7 +134,9 @@ class CaseStatus(str, Enum):
 
     OPEN = "open"
     INVESTIGATING = "investigating"
+    AWAITING_REVIEW = "awaiting_review"
     AWAITING_APPROVAL = "awaiting_approval"
+    OBSERVING = "observing"
     MITIGATED = "mitigated"
     CLOSED = "closed"
     INCONCLUSIVE = "inconclusive"
@@ -66,9 +145,14 @@ class CaseStatus(str, Enum):
 class EventType(str, Enum):
     """Timeline event classifications emitted during investigation and resolution."""
 
+    ALERT = "alert"
     STEP = "step"
     PROPOSAL = "proposal"
+    REVISION = "revision"
+    CONVERSATION = "conversation"
+    REVIEW = "review"
     DECISION = "decision"
+    EXECUTION = "execution"
     MESSAGE = "message"
     VERIFICATION = "verification"
 
@@ -91,28 +175,79 @@ class ServiceArchitectureConfig(BaseModel):
     revision_mode: str = "from_release"
 
 
+class RecoveryCriteriaConfig(BaseModel):
+    """Agreed conditions required to confirm sustained service recovery after an intervention."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    healthy_band_max_ms: float = 220.0
+    min_request_volume: int = 1
+    min_coverage: float = 0.8
+    consecutive_healthy_windows: int = 1
+    error_rate_tolerance: float = 0.01
+    comparison_min_volume: int = 100
+    shared_load_rate_ratio: float = 0.5
+
+
 class ServiceTelemetryConfig(BaseModel):
-    """Selectors used to query observability backends."""
+    """Selectors and baseline metadata used to query observability backends."""
 
     model_config = ConfigDict(extra="forbid")
 
     service_selector: str
     environment_selector: str
+    metric_unit: str = "ms"
+    version_label: str = "cohort"
+    impact_metric: str = "latency_p95_ms"
+    baseline_ms: float = 180.0
 
 
 class ServiceConfig(BaseModel):
-    """Registered service metadata and authorization boundaries."""
+    """Registered service metadata, recovery criteria, and authorization boundaries."""
 
     model_config = ConfigDict(extra="forbid")
 
     service: str
     aliases: list[str] = Field(default_factory=list)
+    environment: str = "production"
     repository: str
     release_source: str
     architecture: ServiceArchitectureConfig
     telemetry: ServiceTelemetryConfig
     threshold_ms: float = 800.0
     owner_team: str = "platform"
+    approver_group: str = "oncall-approvers"
+    runbooks_path: str = "runbooks"
+    config_version: str = "v1"
+    allowed_actions: list[ActionType] = Field(default_factory=lambda: list(ActionType))
+    recovery_criteria: RecoveryCriteriaConfig = Field(default_factory=RecoveryCriteriaConfig)
+
+
+class SourceProbeReport(BaseModel):
+    """Connection test result for an individual operational data source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    status: ConnectorStatus
+    summary: str
+    latest_timestamp: datetime | None = None
+    revision: str | None = None
+    reference: str = ""
+
+
+class ServiceOnboardingReport(BaseModel):
+    """Connection and readiness report produced when registering a service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    service: str
+    canonical_service: str
+    environment: str
+    ready: bool
+    declared_dependencies: list[str] = Field(default_factory=list)
+    probes: dict[str, SourceProbeReport] = Field(default_factory=dict)
+    pending_conclusions: list[str] = Field(default_factory=list)
 
 
 class Alert(BaseModel):
@@ -136,6 +271,48 @@ class Alert(BaseModel):
     def effective_cutoff(self) -> datetime:
         """Return the strict cutoff timestamp bounding all investigation queries."""
         return self.cutoff_at or self.observed_at
+
+
+class AlertEnvelope(BaseModel):
+    """Normalized incoming monitor alert envelope with external correlation identifiers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    event_id: str
+    episode_id: str | None = None
+    state: AlertState = AlertState.FIRING
+    alert: Alert
+
+
+class AlertIngestionResult(BaseModel):
+    """Outcome returned by alert reception before background investigation completes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str
+    episode_id: str
+    event_id: str
+    outcome: AlertIngestOutcome
+    revision_number: int = 1
+    status_code: int = 202
+
+
+class CaseRevision(BaseModel):
+    """Point-in-time investigation revision within a case preserving its cutoff and evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision_number: int
+    cutoff_at: datetime
+    created_at: datetime
+    reason: str = "initial_alert"
+    evidence_ids: list[str] = Field(default_factory=list)
+    proposal_id: str | None = None
+    summary: str = ""
+    action_outcome: str | None = None
+    suggested_next_check: str | None = None
+    turn_id: str | None = None
 
 
 class Release(BaseModel):
@@ -244,6 +421,8 @@ class MetricPoint(BaseModel):
     timestamp: datetime
     value: float
     cohort: str | None = None
+    request_count: int | None = None
+    error_count: int | None = None
 
 
 class MetricSeries(BaseModel):
@@ -263,6 +442,9 @@ class MetricSeries(BaseModel):
     points: list[MetricPoint] = Field(default_factory=list)
     current_value: float | None = None
     value_15m_ago: float | None = None
+    request_volume: int = 0
+    error_total: int = 0
+    duration_ms: float = 0.0
     note: str = ""
 
 
@@ -285,11 +467,14 @@ class AnomalyReport(BaseModel):
     threshold: float = 800.0
     slope_per_minute: float = 0.0
     projected_minutes_to_threshold: float | None = None
+    projection_status: str = "projected"
+    request_volume: int = 0
+    coverage: float = 1.0
     note: str = ""
 
 
 class LogQueryResult(BaseModel):
-    """Aggregated, redacted error log count and sample output."""
+    """Aggregated, redacted error log count, per-cohort error rates, and sample output."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -305,7 +490,13 @@ class LogQueryResult(BaseModel):
     first_occurrence: datetime | None = None
     examples: list[str] = Field(default_factory=list)
     cohort_counts: dict[str, int] = Field(default_factory=dict)
+    cohort_requests: dict[str, int] = Field(default_factory=dict)
+    cohort_error_rates: dict[str, float | None] = Field(default_factory=dict)
+    uncovered_cohorts: list[str] = Field(default_factory=list)
     coverage: float = 1.0
+    duration_ms: float = 0.0
+    numerator_kind: str = "failed_requests"
+    error_definition: str = ""
     note: str = ""
 
 
@@ -320,6 +511,7 @@ class IncidentPrecedent(BaseModel):
     root_cause: str
     resolution: str
     source: str
+    occurred_at: datetime | None = None
 
 
 class RunbookMatch(BaseModel):
@@ -349,6 +541,10 @@ class Evidence(BaseModel):
     observed_fact: str
     revision: str | None = None
     window: str | None = None
+    observation_type: str = "general"
+    cohort: str | None = None
+    comparison_result: str | None = None
+    revision_number: int = 1
 
 
 class Finding(BaseModel):
@@ -365,7 +561,7 @@ class Finding(BaseModel):
 
 
 class ActionProposal(BaseModel):
-    """Proposed preventive action awaiting or resolved by human decision."""
+    """Proposed preventive action awaiting review (shadow) or human decision (assisted)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -381,7 +577,26 @@ class ActionProposal(BaseModel):
     verification_plan: str
     idempotency_key: str
     status: ProposalStatus = ProposalStatus.PENDING
+    revision_number: int = 1
+    version: int = 1
     created_at: datetime
+
+
+class ProposalReview(BaseModel):
+    """Human evaluation of a recommendation in shadow mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_id: str
+    case_id: str
+    proposal_id: str
+    proposal_revision: int = 1
+    reviewer: str
+    verdict: ReviewVerdict
+    comment: str = ""
+    intervened_externally: bool = False
+    confirmed_cause: str | None = None
+    reviewed_at: datetime
 
 
 class HumanDecision(BaseModel):
@@ -398,6 +613,26 @@ class HumanDecision(BaseModel):
     idempotency_key: str
 
 
+class ExternalOperationRecord(BaseModel):
+    """Tracked execution operation dispatched to an external deployment pipeline or ticket system."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    case_id: str
+    proposal_id: str
+    service: str
+    environment: str
+    action: ActionType
+    target_release_id: str
+    operation_key: str
+    status: OperationStatus
+    detail: str = ""
+    started_at: datetime
+    completed_at: datetime | None = None
+    external_ticket_id: str | None = None
+
+
 class ExecutionResult(BaseModel):
     """Execution status of an approved or low-risk preventive action."""
 
@@ -409,6 +644,7 @@ class ExecutionResult(BaseModel):
     detail: str
     executed_at: datetime
     preventive_ticket_id: str | None = None
+    operation_id: str | None = None
 
 
 class VerificationResult(BaseModel):
@@ -424,6 +660,10 @@ class VerificationResult(BaseModel):
     recovered: bool
     case_status: CaseStatus
     detail: str
+    consecutive_healthy_points: int = 0
+    dependency_errors_after: int | None = None
+    request_volume: int = 0
+    coverage: float = 1.0
 
 
 class CaseEvent(BaseModel):
@@ -431,6 +671,7 @@ class CaseEvent(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    sequence_id: int = 0
     event_type: EventType
     case_id: str
     timestamp: datetime
@@ -443,7 +684,7 @@ class CaseEvent(BaseModel):
 
 
 class AuditRecord(BaseModel):
-    """Immutable audit entry persisted to JSON Lines storage."""
+    """Immutable audit entry persisted to JSON Lines or transactional storage."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -457,24 +698,193 @@ class AuditRecord(BaseModel):
     references: list[str] = Field(default_factory=list)
 
 
+class CohortRateWindow(BaseModel):
+    """Comparable error rate computed in code for a single window and cohort."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    window_start: datetime
+    window_end: datetime
+    cohort: str
+    errors: int = 0
+    requests: int | None = None
+    error_rate: float | None = None
+    numerator_kind: str = "failed_requests"
+    error_definition: str = ""
+    coverage: float = 1.0
+    reproducible_query: str = ""
+    limitation: str | None = None
+
+
+class CohortComparisonResult(BaseModel):
+    """Pre/post-deployment cohort comparison with denominator and saturation checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    service: str
+    environment: str
+    release_id: str | None = None
+    deployed_at: datetime | None = None
+    cutoff_at: datetime
+    pre_window_start: datetime
+    pre_window_end: datetime
+    post_window_start: datetime
+    post_window_end: datetime
+    windows: list[CohortRateWindow] = Field(default_factory=list)
+    pre_total_requests: int = 0
+    post_total_requests: int = 0
+    shared_resource_saturated: bool = False
+    verdict: ComparisonVerdict = ComparisonVerdict.INDETERMINATE
+    missing_data: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class ProposalHistoryEntry(BaseModel):
+    """Immutable snapshot of a proposal version across case revisions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: str
+    revision_number: int = 1
+    version: int = 1
+    action: ActionType
+    target_service: str
+    target_release_id: str
+    status: ProposalStatus
+    hypothesis: str = ""
+    justification: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    outcome: str = "initial"
+    turn_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class FollowUpCandidate(BaseModel):
+    """Read-only follow-up investigation finding returned to backend for validation and publication."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: ConversationIntent
+    answer: str
+    hypothesis_under_test: str | None = None
+    cited_evidence_ids: list[str] = Field(default_factory=list)
+    used_existing_evidence_only: bool = False
+    comparison: CohortComparisonResult | None = None
+    comparison_outcome: str = "no_change"
+    affects_rollback: bool = True
+    recommended_follow_up_action: ActionType | None = None
+    follow_up_target_service: str | None = None
+    follow_up_hypothesis: str | None = None
+    suggested_next_check: str | None = None
+    missing_data: list[str] = Field(default_factory=list)
+    cutoff_at: datetime
+
+
+class ConversationTurn(BaseModel):
+    """Persistent conversational turn linked to a case, revision, and evidence citations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str
+    case_id: str
+    client_message_id: str
+    actor: str
+    question: str
+    base_revision: int = 1
+    proposal_id: str | None = None
+    cutoff_at: datetime | None = None
+    intent: ConversationIntent = ConversationIntent.CHALLENGE_HYPOTHESIS
+    status: TurnStatus = TurnStatus.PENDING
+    user_hypothesis: str | None = None
+    referenced_evidence_ids: list[str] = Field(default_factory=list)
+    comparison: CohortComparisonResult | None = None
+    answer: str = ""
+    result_outcome: str = ""
+    published_revision: int | None = None
+    pending_data: list[str] = Field(default_factory=list)
+    work_summary: str = ""
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatSubmissionResult(BaseModel):
+    """Response returned by POST /api/casos/{case_id}/mensajes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str
+    case_id: str
+    status: TurnStatus
+    base_revision: int
+    proposal_status: str | None = None
+    duplicate: bool = False
+    status_code: int = 202
+
+
+class PendingWorkItem(BaseModel):
+    """Durable background job persisted alongside a case state change."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    work_id: str
+    case_id: str
+    revision_number: int = 1
+    work_type: str = "investigate"
+    status: str = "pending"
+    last_step_index: int = 0
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
 class CaseRecord(BaseModel):
     """Complete state of an investigation case."""
 
     model_config = ConfigDict(extra="forbid")
 
     case_id: str
+    version: int = 1
+    mode: OperationalMode = OperationalMode.ASSISTED
+    service_config_version: str = "v1"
+    episode_id: str | None = None
     alert: Alert
     status: CaseStatus = CaseStatus.OPEN
     created_at: datetime
     updated_at: datetime
+    received_events: list[AlertEnvelope] = Field(default_factory=list)
+    revisions: list[CaseRevision] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     connector_gaps: list[str] = Field(default_factory=list)
     partial_findings: Finding | None = None
     suggested_next_check: str | None = None
     proposal: ActionProposal | None = None
+    proposal_history: list[ProposalHistoryEntry] = Field(default_factory=list)
+    conversation_turns: list[ConversationTurn] = Field(default_factory=list)
+    reviews: list[ProposalReview] = Field(default_factory=list)
     decision: HumanDecision | None = None
     execution: ExecutionResult | None = None
+    external_operations: list[ExternalOperationRecord] = Field(default_factory=list)
     verification: VerificationResult | None = None
     events: list[CaseEvent] = Field(default_factory=list)
     final_summary: str = ""
+    crossed_threshold: bool = False
+    threshold_crossed_at: datetime | None = None
 
+
+class PilotMetricsSummary(BaseModel):
+    """Aggregated value and accuracy metrics across pilot episodes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_episodes: int = 0
+    evaluated_episodes: int = 0
+    pending_review_episodes: int = 0
+    useful_recommendations: int = 0
+    false_alarm_rate: float = 0.0
+    confirmed_cause_rate: float = 0.0
+    avg_seconds_to_useful_recommendation: float | None = None
+    avg_observed_margin_minutes_when_crossed: float | None = None

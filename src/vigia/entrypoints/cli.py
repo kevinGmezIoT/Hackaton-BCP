@@ -1,4 +1,4 @@
-"""Terminal CLI entrypoint to reproduce an investigation case and submit human decisions."""
+"""Terminal CLI entrypoint supporting Demo/Pilot profiles, onboarding probes, and HTTP/SSE console."""
 
 from __future__ import annotations
 
@@ -16,9 +16,16 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from vigia.adapters.inbound.http_api import VigiaHttpApp, serve_http
 from vigia.demo import copy_demo_scenario
-from vigia.domain.contracts import Alert, DecisionChoice, ProposalStatus
-from vigia.runtime import build_case_service
+from vigia.domain.contracts import (
+    Alert,
+    DecisionChoice,
+    OperationalMode,
+    ProposalStatus,
+    RuntimeProfile,
+)
+from vigia.runtime import PilotRuntimeConfig, build_pilot_case_service
 
 
 class _OfflineDemoChatModel(BaseChatModel):
@@ -102,7 +109,8 @@ class _OfflineDemoChatModel(BaseChatModel):
                         "args": {
                             "service": "pagos-core",
                             "pattern": "Connection pool exhausted",
-                            "window_minutes": 30,
+                            "window_start": "2026-11-12T08:55:00-05:00",
+                            "window_end": "2026-11-12T09:12:00-05:00",
                         },
                     },
                     {
@@ -146,7 +154,9 @@ class _OfflineDemoChatModel(BaseChatModel):
                                 "EV-005",
                                 "EV-006",
                                 "EV-007",
+                                "EV-008",
                                 "EV-009",
+                                "EV-010",
                             ],
                             "verification_plan": (
                                 "Query transferencias latency_p95_ms 7-10 min post-rollback; "
@@ -164,7 +174,7 @@ class _OfflineDemoChatModel(BaseChatModel):
                     "**Probable Cause & Dependency Path**: Transferencias calls pagos-core [EV-002]; "
                     f"active release CHG-4821 ({self.deployed_sha[:8]}) reduced `pool_size` 80 -> 50 in "
                     "`src/pool.py` [EV-003, EV-004, EV-005], producing 312 pool exhaustion errors since 09:01 [EV-006].\n"
-                    "**Proposed Action**: Rollback `CHG-4821` on `pagos-core` (awaiting human approval)."
+                    "**Proposed Action**: Rollback `CHG-4821` on `pagos-core`."
                 )
             ),
         ]
@@ -248,7 +258,7 @@ def _bootstrap_demo_workspace(temp_root: Path) -> tuple[Path, dict[str, Path], s
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Vigía Alternative A Investigator CLI")
+    parser = argparse.ArgumentParser(description="Vigía Investigator CLI & Pilot Server")
     parser.add_argument(
         "--service", default="Transferencias", help="Target alert service name or alias."
     )
@@ -261,10 +271,34 @@ def main(argv: list[str] | None = None) -> int:
         help="LangChain model identifier (or set VIGIA_MODEL).",
     )
     parser.add_argument(
+        "--profile",
+        choices=["demo", "pilot"],
+        default="demo",
+        help="Runtime adapter profile.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["shadow", "assisted"],
+        default=None,
+        help="Operational mode (defaults to assisted in demo, shadow in pilot).",
+    )
+    parser.add_argument(
         "--demo-offline",
         action="store_true",
-        help="Run the Transfers -> pagos-core demo using a deterministic offline scripted model.",
+        help="Run the Transfers -> pagos-core scenario using a deterministic offline scripted model.",
     )
+    parser.add_argument(
+        "--probe-service",
+        action="store_true",
+        help="Run onboarding connectivity check for --service and exit.",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start the HTTP/SSE Pilot API & Console server.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP server host.")
+    parser.add_argument("--port", type=int, default=8000, help="HTTP server port.")
     parser.add_argument(
         "--decision",
         choices=["approve", "reject", "prompt"],
@@ -276,6 +310,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    profile = RuntimeProfile(args.profile)
+    mode = OperationalMode(
+        args.mode or ("shadow" if profile == RuntimeProfile.PILOT else "assisted")
+    )
+
     with tempfile.TemporaryDirectory(prefix="vigia-demo-") as tmp:
         tmp_path = Path(tmp)
         fixtures_dir, repos, base_sha, deployed_sha = _bootstrap_demo_workspace(tmp_path)
@@ -284,67 +323,94 @@ def main(argv: list[str] | None = None) -> int:
             if args.demo_offline
             else args.model
         )
-        service, _, _ = build_case_service(
+        runtime_cfg = PilotRuntimeConfig(
+            profile=profile,
+            mode=mode,
             fixtures_dir=fixtures_dir,
             authorized_repos=repos,
-            model=model,
+            db_path=tmp_path / "vigia.db",
             audit_path=tmp_path / "audit.jsonl",
+            strict_rollback_validation=(profile == RuntimeProfile.PILOT),
         )
+        service, _, _ = build_pilot_case_service(runtime_cfg, model=model)
+        try:
+            cutoff_dt = datetime.fromisoformat(args.cutoff)
 
-        cutoff_dt = datetime.fromisoformat(args.cutoff)
-        alert = Alert(
-            service=args.service,
-            environment="production",
-            metric="latency_p95_ms",
-            observed_at=cutoff_dt,
-            cutoff_at=cutoff_dt,
-            symptom="p95 latency rose from 180 ms to 420 ms in 15 minutes",
-            baseline_value=180.0,
-            current_value=420.0,
-            threshold_value=800.0,
-            projected_minutes_to_threshold=24.0,
-        )
-        case = service.start_case(alert)
-        print(f"\n=== Case {case.case_id} ({case.status.value}) ===")
-        print(case.final_summary)
+            if args.probe_service:
+                report = service.probe_service_onboarding(args.service, at_time=cutoff_dt)
+                print(json.dumps(report.model_dump(mode="json"), indent=2))
+                return 0 if report.ready else 1
 
-        if case.proposal is None:
-            print("\nNo proposal registered.")
-            if case.suggested_next_check:
-                print(f"Suggested next check: {case.suggested_next_check}")
-            return 0
+            if args.serve:
+                app = VigiaHttpApp(
+                    service,
+                    webhook_token=os.environ.get("VIGIA_WEBHOOK_TOKEN"),
+                    auto_process_alerts=True,
+                )
+                print(f"Serving Vigía Pilot API & Console at http://{args.host}:{args.port} (mode={mode.value})")
+                try:
+                    serve_http(app, host=args.host, port=args.port)
+                except KeyboardInterrupt:
+                    return 0
+                return 0
 
-        print(
-            f"\nProposal {case.proposal.proposal_id}: action={case.proposal.action.value} "
-            f"target={case.proposal.target_service} ({case.proposal.target_release_id}) "
-            f"risk={case.proposal.risk_level.value} status={case.proposal.status.value}"
-        )
-        if case.proposal.status != ProposalStatus.PENDING:
-            if case.execution:
-                print(f"Execution: {case.execution.detail}")
-            return 0
+            alert = Alert(
+                service=args.service,
+                environment="production",
+                metric="latency_p95_ms",
+                observed_at=cutoff_dt,
+                cutoff_at=cutoff_dt,
+                symptom="p95 latency rose from 180 ms to 420 ms in 15 minutes",
+                baseline_value=180.0,
+                current_value=420.0,
+                threshold_value=800.0,
+                projected_minutes_to_threshold=24.0,
+            )
+            case = service.start_case(alert, mode=mode)
+            print(f"\n=== Case {case.case_id} ({case.status.value}, mode={case.mode.value}) ===")
+            print(case.final_summary)
 
-        choice_raw = args.decision
-        if choice_raw == "prompt":
-            choice_raw = input("Decision [approve/reject]: ").strip().lower()
-        if choice_raw not in {"approve", "reject"}:
-            print("Invalid decision; leaving proposal pending.", file=sys.stderr)
-            return 1
+            if case.proposal is None:
+                print("\nNo proposal registered.")
+                if case.suggested_next_check:
+                    print(f"Suggested next check: {case.suggested_next_check}")
+                return 0
 
-        updated = service.resolve_approval(
-            case_id=case.case_id,
-            proposal_id=case.proposal.proposal_id,
-            actor=args.actor,
-            decision=DecisionChoice(choice_raw),
-        )
-        print(f"\nAfter decision ({choice_raw}): case status = {updated.status.value}")
-        if updated.execution:
-            print(f"Execution: {updated.execution.detail}")
-        if updated.verification:
-            print(f"Verification: {updated.verification.detail}")
+            print(
+                f"\nProposal {case.proposal.proposal_id}: action={case.proposal.action.value} "
+                f"target={case.proposal.target_service} ({case.proposal.target_release_id}) "
+                f"risk={case.proposal.risk_level.value} status={case.proposal.status.value}"
+            )
+            if case.mode == OperationalMode.SHADOW:
+                print("Shadow mode active: recommendation persisted for human review; zero external actions executed.")
+                return 0
+            if case.proposal.status != ProposalStatus.PENDING:
+                if case.execution:
+                    print(f"Execution: {case.execution.detail}")
+                return 0
+
+            choice_raw = args.decision
+            if choice_raw == "prompt":
+                choice_raw = input("Decision [approve/reject]: ").strip().lower()
+            if choice_raw not in {"approve", "reject"}:
+                print("Invalid decision; leaving proposal pending.", file=sys.stderr)
+                return 1
+
+            updated = service.resolve_approval(
+                case_id=case.case_id,
+                proposal_id=case.proposal.proposal_id,
+                actor=args.actor,
+                decision=DecisionChoice(choice_raw),
+            )
+            print(f"\nAfter decision ({choice_raw}): case status = {updated.status.value}")
+            if updated.execution:
+                print(f"Execution: {updated.execution.detail}")
+            if updated.verification:
+                print(f"Verification: {updated.verification.detail}")
+        finally:
+            service.close()
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
