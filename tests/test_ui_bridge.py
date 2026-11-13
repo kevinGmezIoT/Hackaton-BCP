@@ -27,7 +27,7 @@ def test_demo_emits_deployment_and_first_error_markers(transfers_workspace):
         timeline = [m for event in case.events for m in bridge_events(case, event, True)]
         steps = {m.get("herramienta"): m for m in timeline}
         change = steps["listar_cambios"]["resultado"]
-        assert (change["id"], change["hora"]) == ("CHG-4821", "08:55:00")
+        assert (change[0]["id"], change[0]["hora"]) == ("CHG-4821", "08:55:00")
         assert steps["buscar_logs"]["resultado"]["primera_ocurrencia"] == "09:01:04"
         assert steps["detectar_anomalia"]["resultado"]["minutos_para_cruce"] > 0
     finally:
@@ -54,6 +54,9 @@ def test_bridge_delivers_retries_waits_and_closes(transfers_workspace, tmp_path,
 
         def do_GET(self):
             assert self.headers["X-Vigia-Token"] == "demo-token"
+            if self.path == "/api/salud":
+                self.respond(200, {"instance_id": "test-bridge"})
+                return
             assert self.path == f"/ui/{case_id}/voto?espera=25"
             self.respond(200, {"decision": votes.pop(0)})
 

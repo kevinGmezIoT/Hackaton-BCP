@@ -420,6 +420,8 @@ def _build_runtime_config(
     audit_arg = args.audit_path or os.environ.get("VIGIA_AUDIT_PATH")
     prom_url = args.prometheus_url or os.environ.get("VIGIA_PROMETHEUS_URL")
     loki_url = args.loki_url or os.environ.get("VIGIA_LOKI_URL")
+    metrics_api_url = getattr(args, "metrics_api_url", None) or os.environ.get("VIGIA_METRICS_API_URL")
+    logs_api_url = getattr(args, "logs_api_url", None) or os.environ.get("VIGIA_LOGS_API_URL")
     github_api_url = args.github_api_url or os.environ.get("VIGIA_GITHUB_API_URL")
     if github_repos and not github_api_url:
         github_api_url = "https://api.github.com"
@@ -437,6 +439,8 @@ def _build_runtime_config(
             authorized_repos,
             prom_url,
             loki_url,
+            metrics_api_url,
+            logs_api_url,
         )
     )
     if uses_external_workspace:
@@ -462,6 +466,8 @@ def _build_runtime_config(
         audit_path=Path(audit_arg) if audit_arg else (tmp_path / "audit.jsonl"),
         prometheus_url=prom_url,
         loki_url=loki_url,
+        metrics_api_url=metrics_api_url,
+        logs_api_url=logs_api_url,
         github_api_url=github_api_url,
         github_service_repos=github_repos,
         strict_rollback_validation=(profile == RuntimeProfile.PILOT),
@@ -534,6 +540,16 @@ def main(argv: list[str] | None = None) -> int:
         "--loki-url",
         default=None,
         help="Loki HTTP base URL (or VIGIA_LOKI_URL).",
+    )
+    parser.add_argument(
+        "--metrics-api-url",
+        default=None,
+        help="REST metrics API endpoint URL (or VIGIA_METRICS_API_URL).",
+    )
+    parser.add_argument(
+        "--logs-api-url",
+        default=None,
+        help="REST logs API endpoint URL (or VIGIA_LOGS_API_URL).",
     )
     parser.add_argument(
         "--github-api-url",
@@ -621,6 +637,7 @@ def main(argv: list[str] | None = None) -> int:
                     trusted_proxy_token=os.environ.get("VIGIA_TRUSTED_PROXY_TOKEN"),
                     allow_demo_console_session=(profile == RuntimeProfile.DEMO),
                     auto_process_alerts=False,
+                    bridge_token=os.environ.get("VIGIA_BRIDGE_TOKEN"),
                 )
                 print(f"Serving Vigía Pilot API & Console at http://{args.host}:{args.port} (mode={mode.value})")
                 try:

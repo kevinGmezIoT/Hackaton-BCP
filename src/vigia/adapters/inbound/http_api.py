@@ -35,6 +35,7 @@ from vigia.application.approval_service import (
     UnauthorizedApproverError,
 )
 from vigia.application.case_service import CaseNotFoundError, CaseService, UnknownServiceError
+from vigia.adapters.inbound.bridge_api import BridgeAgentApi
 from vigia.domain.contracts import (
     Alert,
     AlertEnvelope,
@@ -532,6 +533,7 @@ class VigiaHttpApp:
         webhook_token: str | None = None,
         require_user_auth: bool = False,
         auto_process_alerts: bool = False,
+        bridge_token: str | None = None,
         session_secret: str | None = None,
         trusted_proxy_token: str | None = None,
         allow_demo_console_session: bool = False,
@@ -541,6 +543,7 @@ class VigiaHttpApp:
         self._webhook_token = webhook_token
         self._require_user_auth = require_user_auth
         self._auto_process_alerts = auto_process_alerts
+        self._bridge_api = BridgeAgentApi(service, bridge_token or "")
         self._session_secret = (session_secret or secrets.token_urlsafe(32)).encode("utf-8")
         self._trusted_proxy_token = trusted_proxy_token
         self._allow_demo_console_session = allow_demo_console_session
@@ -682,6 +685,17 @@ class VigiaHttpApp:
     ) -> ApiResponse:
         """Dispatch an HTTP request and return a framework-agnostic ApiResponse."""
         hdrs = self._normalize_headers(headers)
+        bridge_path = urllib.parse.urlsplit(raw_path).path
+        if method.upper() == "POST" and bridge_path in {
+            self._bridge_api.chat_path, self._bridge_api.investigate_path
+        }:
+            status, data = self._bridge_api.handle(bridge_path, hdrs.get("x-vigia-token", ""), body)
+            if status == 202:
+                if self._auto_process_alerts:
+                    self._service.process_pending_work(data["caso"])
+                elif self._on_work_enqueued:
+                    self._on_work_enqueued(data["caso"])
+            return self._json_response(status, data)
         parsed = urllib.parse.urlsplit(raw_path)
         path = parsed.path.rstrip("/") or "/"
         qs = urllib.parse.parse_qs(parsed.query)

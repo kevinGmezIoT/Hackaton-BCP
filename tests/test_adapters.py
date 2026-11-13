@@ -8,6 +8,7 @@ from conftest import TransfersWorkspace
 
 from vigia.adapters.outbound.drawio import DrawioArchitectureAdapter
 from vigia.adapters.outbound.executor import SimulationState
+from vigia.adapters.outbound.http_telemetry import RestTelemetryApiAdapter
 from vigia.adapters.outbound.knowledge import LocalKnowledgeAdapter
 from vigia.adapters.outbound.local_git import JsonReleaseSourceAdapter, LocalGitRepositoryAdapter
 from vigia.adapters.outbound.service_catalog import YamlServiceCatalogAdapter
@@ -172,4 +173,137 @@ def test_knowledge_adapter_discriminates_relevant_incidents_and_runbook(
     runbooks = knowledge.search_runbook("Connection pool exhausted rollback")
     assert runbooks
     assert runbooks[0].runbook_id == "RB-087"
+
+
+def test_rest_telemetry_adapter_queries_metrics_detects_anomaly_and_searches_logs(
+    transfers_workspace: TransfersWorkspace,
+) -> None:
+    catalog = YamlServiceCatalogAdapter.from_yaml(
+        transfers_workspace.fixtures_dir / "services.yaml"
+    )
+    seen_calls: list[tuple[str, dict[str, str]]] = []
+
+    def fake_http_get(url: str, params: dict[str, str], headers: dict[str, str]):
+        seen_calls.append((url, dict(params)))
+        if url.endswith("/api/metricas"):
+            return 200, {
+                "servicio": "transferencias",
+                "unidad": "ms",
+                "consultas_sesion": 3000,
+                "errores": 12,
+                "puntos": [
+                    ["2026-11-13T17:30:00+00:00", 180],
+                    ["2026-11-13T17:31:00+00:00", 182],
+                    ["2026-11-13T17:32:00+00:00", 179],
+                    ["2026-11-13T17:54:00+00:00", 520],
+                    ["2026-11-13T17:55:00+00:00", 590],
+                    ["2026-11-13T17:56:00+00:00", 660],
+                    ["2026-11-13T18:10:00+00:00", 999],
+                ],
+            }
+        if url.endswith("/api/logs"):
+            return 200, [
+                {
+                    "fecha": "2026-11-13T17:55:30+00:00",
+                    "servicio": "transferencias",
+                    "endpoint": "/api/operaciones/transferencia",
+                    "metodo": "POST",
+                    "status": 504,
+                    "latencia_ms": 1200,
+                    "fase": "degradacion",
+                    "mensaje": "Upstream timeout token=secret-abc",
+                },
+                {
+                    "fecha": "2026-11-13T17:55:45+00:00",
+                    "servicio": "transferencias",
+                    "endpoint": "/api/operaciones/transferencia",
+                    "metodo": "POST",
+                    "status": 201,
+                    "latencia_ms": 188,
+                    "fase": "degradacion",
+                },
+                {
+                    "fecha": "2026-11-13T18:05:00+00:00",
+                    "servicio": "transferencias",
+                    "endpoint": "/api/operaciones/transferencia",
+                    "metodo": "POST",
+                    "status": 500,
+                    "latencia_ms": 1500,
+                    "fase": "degradacion",
+                },
+            ]
+        return 404, {"error": "not found"}
+
+    adapter = RestTelemetryApiAdapter(
+        catalog,
+        metrics_url="http://10.233.43.117:8010/api/metricas?servicio=transferencias&minutos=1",
+        logs_url="http://10.233.43.117:8010/api/logs?servicio=transferencias&limite=10",
+        http_get=fake_http_get,
+    )
+    cutoff = datetime.fromisoformat("2026-11-13T17:56:00+00:00")
+
+    series = adapter.query_metrics("Transferencias", "production", "latency_p95_ms", 90, cutoff)
+    assert series.status == ConnectorStatus.OK
+    assert series.current_value == 660.0
+    assert series.request_volume == 3000
+    assert series.error_total == 12
+    assert seen_calls[0] == (
+        "http://10.233.43.117:8010/api/metricas",
+        {"servicio": "transferencias", "minutos": "60"},
+    )
+
+    anomaly = adapter.detect_anomaly("Transferencias", "production", "latency_p95_ms", cutoff)
+    assert anomaly.status == ConnectorStatus.OK
+    assert anomaly.is_anomalous is True
+
+    logs = adapter.search_logs("Transferencias", "production", "*", 30, cutoff)
+    assert logs.status == ConnectorStatus.OK
+    assert logs.total == 1
+    assert logs.cohort_requests == {"degradacion": 2}
+    assert logs.cohort_error_rates == {"degradacion": 0.5}
+    assert "[REDACTED]" in logs.examples[0]
+    assert seen_calls[-1][0] == "http://10.233.43.117:8010/api/logs"
+
+    unauthorized = adapter.query_metrics("unknown-svc", "production", "latency_p95_ms", 15, cutoff)
+    assert unauthorized.status == ConnectorStatus.UNAUTHORIZED
+
+
+def test_runtime_wires_rest_telemetry_api_from_env(
+    transfers_workspace: TransfersWorkspace,
+    monkeypatch,
+) -> None:
+    import argparse
+    from vigia.domain.contracts import OperationalMode, RuntimeProfile
+    from vigia.entrypoints.cli import _build_runtime_config
+    from vigia.runtime import build_pilot_case_service
+
+    monkeypatch.setenv("VIGIA_METRICS_API_URL", "http://10.233.43.117:8010/api/metricas")
+    monkeypatch.setenv("VIGIA_LOGS_API_URL", "http://10.233.43.117:8010/api/logs")
+    args = argparse.Namespace(
+        fixtures_dir=str(transfers_workspace.fixtures_dir),
+        catalog=None,
+        metrics_path=None,
+        logs_path=None,
+        db_path=None,
+        audit_path=None,
+        prometheus_url=None,
+        loki_url=None,
+        github_api_url=None,
+        github_repo=None,
+        local_repo=None,
+    )
+    cfg, _, _ = _build_runtime_config(
+        args,
+        transfers_workspace.root / "tmp",
+        RuntimeProfile.PILOT,
+        OperationalMode.SHADOW,
+    )
+    assert cfg.metrics_api_url == "http://10.233.43.117:8010/api/metricas"
+    assert cfg.logs_api_url == "http://10.233.43.117:8010/api/logs"
+    service, _, _ = build_pilot_case_service(cfg, model="vigia-unused")
+    try:
+        assert isinstance(service._deps.telemetry, RestTelemetryApiAdapter)
+    finally:
+        service.close()
+
 

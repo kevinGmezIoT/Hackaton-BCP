@@ -15,7 +15,11 @@ from vigia.adapters.outbound.case_store import SqliteCaseStoreAdapter
 from vigia.adapters.outbound.drawio import DrawioArchitectureAdapter
 from vigia.adapters.outbound.executor import SimulatedActionExecutor, SimulationState
 from vigia.adapters.outbound.github import GitHubReleaseSourceAdapter, GitHubRepositoryAdapter
-from vigia.adapters.outbound.http_telemetry import HttpGetFn, PrometheusLokiTelemetryAdapter
+from vigia.adapters.outbound.http_telemetry import (
+    HttpGetFn,
+    PrometheusLokiTelemetryAdapter,
+    RestTelemetryApiAdapter,
+)
 from vigia.adapters.outbound.knowledge import LocalKnowledgeAdapter
 from vigia.adapters.outbound.local_git import JsonReleaseSourceAdapter, LocalGitRepositoryAdapter
 from vigia.adapters.outbound.service_catalog import YamlServiceCatalogAdapter
@@ -45,6 +49,8 @@ class PilotRuntimeConfig:
     audit_path: Path | None = None
     prometheus_url: str | None = None
     loki_url: str | None = None
+    metrics_api_url: str | None = None
+    logs_api_url: str | None = None
     github_api_url: str | None = None
     github_service_repos: dict[str, str] = field(default_factory=dict)
     http_get: HttpGetFn | None = None
@@ -143,6 +149,8 @@ def build_pilot_case_service(
             config.runbooks_dir,
             config.prometheus_url,
             config.loki_url,
+            config.metrics_api_url,
+            config.logs_api_url,
             config.github_service_repos,
         )
     ):
@@ -171,7 +179,15 @@ def build_pilot_case_service(
     telemetry_token = os.environ.get("VIGIA_TELEMETRY_TOKEN")
     github_token = os.environ.get("VIGIA_GITHUB_TOKEN")
 
-    if config.prometheus_url or config.loki_url:
+    if config.metrics_api_url or config.logs_api_url:
+        telemetry = RestTelemetryApiAdapter(
+            catalog,
+            metrics_url=config.metrics_api_url,
+            logs_url=config.logs_api_url,
+            auth_token=telemetry_token,
+            http_get=config.http_get,
+        )
+    elif config.prometheus_url or config.loki_url:
         telemetry = PrometheusLokiTelemetryAdapter(
             catalog,
             prometheus_base_url=config.prometheus_url or "http://prometheus.internal",

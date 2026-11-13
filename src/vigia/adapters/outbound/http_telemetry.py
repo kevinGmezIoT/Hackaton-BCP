@@ -24,7 +24,151 @@ from vigia.domain.contracts import (
 )
 from vigia.domain.ports import ServiceCatalogPort
 
-HttpGetFn = Callable[[str, dict[str, str], dict[str, str]], tuple[int, dict[str, Any]]]
+HttpGetFn = Callable[[str, dict[str, str], dict[str, str]], tuple[int, Any]]
+
+
+def _build_auth_headers(auth_token: str | None) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    return headers
+
+
+def _normalize_rest_endpoint(raw_url: str | None, default_path: str) -> str | None:
+    """Strip query parameters from a configured endpoint URL and ensure a path."""
+    if not raw_url:
+        return None
+    cleaned = raw_url.strip()
+    if not cleaned:
+        return None
+    parts = urllib.parse.urlsplit(cleaned)
+    if parts.scheme and parts.netloc:
+        path = parts.path.rstrip("/") or default_path
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    return cleaned.rstrip("/")
+
+
+def _is_error_log_entry(
+    message_lower: str,
+    *,
+    level: str = "",
+    http_status: int | None = None,
+) -> bool:
+    if http_status is not None and http_status >= 500:
+        return True
+    if level == "ERROR":
+        return True
+    return (
+        '"level":"error"' in message_lower
+        or '"level": "error"' in message_lower
+        or "error" in message_lower
+        or "exhausted" in message_lower
+        or "timeout" in message_lower
+        or "saturat" in message_lower
+    )
+
+
+def _finalize_metric_series(
+    *,
+    canonical: str,
+    environment: str,
+    metric: str,
+    unit: str,
+    window_start: datetime,
+    cutoff_at: datetime,
+    query_ref: str,
+    points: list[MetricPoint],
+    request_volume: int | None,
+    error_total: int | None,
+    duration_ms: float,
+    step_seconds: int = 60,
+    notes: list[str] | None = None,
+) -> MetricSeries:
+    expected_buckets = max(1, int((cutoff_at - window_start).total_seconds() // step_seconds) + 1)
+    observed_buckets = len({int(p.timestamp.timestamp() // step_seconds) for p in points})
+    temporal_coverage = min(1.0, round(observed_buckets / expected_buckets, 4))
+    current_val = points[-1].value
+    ref_target = cutoff_at - timedelta(minutes=15)
+    closest_15m = min(points, key=lambda p: abs((p.timestamp - ref_target).total_seconds()))
+    return MetricSeries(
+        status=ConnectorStatus.OK,
+        service=canonical,
+        environment=environment,
+        metric=metric,
+        unit=unit,
+        window_start=window_start,
+        window_end=cutoff_at,
+        reproducible_query=query_ref,
+        coverage=temporal_coverage,
+        points=points,
+        current_value=current_val,
+        value_15m_ago=closest_15m.value,
+        request_volume=request_volume,
+        error_total=error_total,
+        duration_ms=duration_ms,
+        note="; ".join(notes or []),
+    )
+
+
+def _finalize_log_query_result(
+    *,
+    canonical: str,
+    environment: str,
+    pattern: str,
+    effective_start: datetime,
+    effective_end: datetime,
+    query_ref: str,
+    total: int,
+    first_seen: datetime | None,
+    examples: list[str],
+    cohort_counts: dict[str, int],
+    cohort_requests: dict[str, int],
+    cohort: str | None,
+    duration_ms: float,
+) -> LogQueryResult:
+    if cohort is not None and cohort not in cohort_requests and cohort not in cohort_counts:
+        cohort_requests[cohort] = 0
+
+    all_cohorts = set(cohort_requests.keys()) | set(cohort_counts.keys())
+    cohort_error_rates: dict[str, float | None] = {}
+    uncovered_cohorts: list[str] = []
+    for coh in sorted(all_cohorts):
+        reqs = cohort_requests.get(coh, 0)
+        errs = cohort_counts.get(coh, 0)
+        if reqs <= 0 or coh == "unknown":
+            cohort_requests.setdefault(coh, 0)
+            cohort_error_rates[coh] = None
+            uncovered_cohorts.append(coh)
+        else:
+            cohort_error_rates[coh] = round(errs / reqs, 4)
+
+    coverage = 1.0
+    if cohort is not None and cohort in uncovered_cohorts and total == 0:
+        coverage = 0.0
+    elif all_cohorts and len(uncovered_cohorts) == len(all_cohorts):
+        coverage = 0.0
+
+    status = ConnectorStatus.OK if total > 0 else ConnectorStatus.NO_RESULTS
+    return LogQueryResult(
+        status=status,
+        service=canonical,
+        environment=environment,
+        pattern=pattern,
+        window_start=effective_start,
+        window_end=effective_end,
+        reproducible_query=query_ref,
+        total=total,
+        first_occurrence=first_seen,
+        examples=examples,
+        cohort_counts=cohort_counts,
+        cohort_requests=cohort_requests,
+        cohort_error_rates=cohort_error_rates,
+        uncovered_cohorts=uncovered_cohorts,
+        coverage=coverage,
+        duration_ms=duration_ms,
+        numerator_kind="log_events_per_request",
+        error_definition=pattern,
+    )
 
 
 def _parse_telemetry_timestamp(raw_ts: Any, target_tz: Any = timezone.utc) -> datetime:
@@ -89,6 +233,37 @@ def _default_http_get(
         return exc.code, {"error": str(exc)}
 
 
+class _RetryJsonClient:
+    """Bounded-retry HTTP JSON client shared by outbound telemetry adapters."""
+
+    def __init__(
+        self,
+        *,
+        auth_token: str | None = None,
+        http_get: HttpGetFn | None = None,
+        max_retries_per_case: int = 2,
+    ) -> None:
+        self._auth_token = auth_token
+        self._http_get = http_get or _default_http_get
+        self._max_retries = max_retries_per_case
+        self._retries_used = 0
+
+    def headers(self) -> dict[str, str]:
+        return _build_auth_headers(self._auth_token)
+
+    def get_json(self, url: str, params: dict[str, str]) -> tuple[int, Any]:
+        while True:
+            try:
+                status_code, payload = self._http_get(url, params, self.headers())
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                status_code, payload = 503, {"error": str(exc)}
+
+            if status_code in {502, 503, 504} and self._retries_used < self._max_retries:
+                self._retries_used += 1
+                continue
+            return status_code, payload
+
+
 class PrometheusLokiTelemetryAdapter:
     """Queries Prometheus HTTP API for metrics and Loki HTTP API for logs."""
 
@@ -105,32 +280,21 @@ class PrometheusLokiTelemetryAdapter:
         self._catalog = catalog
         self._prom_url = prometheus_base_url.rstrip("/")
         self._loki_url = loki_base_url.rstrip("/")
-        self._auth_token = auth_token
-        self._http_get = http_get or _default_http_get
-        self._max_retries = max_retries_per_case
-        self._retries_used = 0
+        self._client = _RetryJsonClient(
+            auth_token=auth_token,
+            http_get=http_get,
+            max_retries_per_case=max_retries_per_case,
+        )
 
     def _headers(self) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
-        if self._auth_token:
-            headers["Authorization"] = f"Bearer {self._auth_token}"
-        return headers
+        return self._client.headers()
 
     def _call_with_retry(
         self,
         url: str,
         params: dict[str, str],
-    ) -> tuple[int, dict[str, Any]]:
-        while True:
-            try:
-                status_code, payload = self._http_get(url, params, self._headers())
-            except (TimeoutError, ConnectionError, OSError) as exc:
-                status_code, payload = 503, {"error": str(exc)}
-
-            if status_code in {502, 503, 504} and self._retries_used < self._max_retries:
-                self._retries_used += 1
-                continue
-            return status_code, payload
+    ) -> tuple[int, Any]:
+        return self._client.get_json(url, params)
 
     def _query_counter_sum(
         self,
@@ -318,36 +482,26 @@ class PrometheusLokiTelemetryAdapter:
                 step_seconds=step_seconds,
             )
 
-        expected_buckets = max(1, int((cutoff_at - window_start).total_seconds() // step_seconds) + 1)
-        observed_buckets = len({int(p.timestamp.timestamp() // step_seconds) for p in points})
-        temporal_coverage = min(1.0, round(observed_buckets / expected_buckets, 4))
-
         notes: list[str] = []
         if total_requests is None:
             notes.append("request_volume unknown (http_requests_total series unavailable)")
         if total_errors is None:
             notes.append("error_total unknown (http_request_errors_total series unavailable)")
 
-        current_val = points[-1].value
-        ref_target = cutoff_at - timedelta(minutes=15)
-        closest_15m = min(points, key=lambda p: abs((p.timestamp - ref_target).total_seconds()))
-        return MetricSeries(
-            status=ConnectorStatus.OK,
-            service=canonical,
+        return _finalize_metric_series(
+            canonical=canonical,
             environment=environment,
             metric=metric,
             unit=unit,
             window_start=window_start,
-            window_end=cutoff_at,
-            reproducible_query=query_ref,
-            coverage=temporal_coverage,
+            cutoff_at=cutoff_at,
+            query_ref=query_ref,
             points=points,
-            current_value=current_val,
-            value_15m_ago=closest_15m.value,
             request_volume=total_requests,
             error_total=total_errors,
             duration_ms=duration_ms,
-            note="; ".join(notes),
+            step_seconds=step_seconds,
+            notes=notes,
         )
 
     def detect_anomaly(
@@ -478,16 +632,7 @@ class PrometheusLokiTelemetryAdapter:
                 if "requests" in message.lower() or "req/min" in message.lower():
                     cohort_requests[entry_cohort] = cohort_requests.get(entry_cohort, 0) + count
                 if lowered_pattern == "*":
-                    is_err = (
-                        stream_level == "ERROR"
-                        or '"level":"error"' in message.lower()
-                        or '"level": "error"' in message.lower()
-                        or "error" in message.lower()
-                        or "exhausted" in message.lower()
-                        or "timeout" in message.lower()
-                        or "saturat" in message.lower()
-                    )
-                    if not is_err:
+                    if not _is_error_log_entry(message.lower(), level=stream_level):
                         continue
                 elif lowered_pattern not in message.lower():
                     continue
@@ -500,47 +645,359 @@ class PrometheusLokiTelemetryAdapter:
                         redact_sensitive_text(f"{ts.isoformat()} [{entry_cohort}] {message}")
                     )
 
-        if cohort is not None and cohort not in cohort_requests and cohort not in cohort_counts:
-            cohort_requests[cohort] = 0
-
-        all_cohorts = set(cohort_requests.keys()) | set(cohort_counts.keys())
-        cohort_error_rates: dict[str, float | None] = {}
-        uncovered_cohorts: list[str] = []
-        for coh in sorted(all_cohorts):
-            reqs = cohort_requests.get(coh, 0)
-            errs = cohort_counts.get(coh, 0)
-            if reqs <= 0 or coh == "unknown":
-                cohort_requests.setdefault(coh, 0)
-                cohort_error_rates[coh] = None
-                uncovered_cohorts.append(coh)
-            else:
-                cohort_error_rates[coh] = round(errs / reqs, 4)
-
-        coverage = 1.0
-        if cohort is not None and cohort in uncovered_cohorts and total == 0:
-            coverage = 0.0
-        elif all_cohorts and len(uncovered_cohorts) == len(all_cohorts):
-            coverage = 0.0
-
-        status = ConnectorStatus.OK if total > 0 else ConnectorStatus.NO_RESULTS
-        return LogQueryResult(
-            status=status,
-            service=canonical,
+        return _finalize_log_query_result(
+            canonical=canonical,
             environment=environment,
             pattern=pattern,
-            window_start=effective_start,
-            window_end=effective_end,
-            reproducible_query=query_ref,
+            effective_start=effective_start,
+            effective_end=effective_end,
+            query_ref=query_ref,
             total=total,
-            first_occurrence=first_seen,
+            first_seen=first_seen,
             examples=examples,
             cohort_counts=cohort_counts,
             cohort_requests=cohort_requests,
-            cohort_error_rates=cohort_error_rates,
-            uncovered_cohorts=uncovered_cohorts,
-            coverage=coverage,
+            cohort=cohort,
             duration_ms=duration_ms,
-            numerator_kind="log_events_per_request",
-            error_definition=pattern,
+        )
+
+
+class RestTelemetryApiAdapter:
+    """Queries custom HTTP REST telemetry endpoints (/api/metricas and /api/logs)."""
+
+    def __init__(
+        self,
+        catalog: ServiceCatalogPort,
+        *,
+        metrics_url: str | None = None,
+        logs_url: str | None = None,
+        auth_token: str | None = None,
+        http_get: HttpGetFn | None = None,
+        max_retries_per_case: int = 2,
+        log_limit: int = 500,
+    ) -> None:
+        self._catalog = catalog
+        self._metrics_url = _normalize_rest_endpoint(metrics_url, "/api/metricas")
+        self._logs_url = _normalize_rest_endpoint(logs_url, "/api/logs")
+        self._client = _RetryJsonClient(
+            auth_token=auth_token,
+            http_get=http_get,
+            max_retries_per_case=max_retries_per_case,
+        )
+        self._log_limit = max(1, log_limit)
+
+    def query_metrics(
+        self,
+        service: str,
+        environment: str,
+        metric: str,
+        window_minutes: int,
+        cutoff_at: datetime,
+        allow_post_action: bool = False,
+    ) -> MetricSeries:
+        t0 = time.perf_counter()
+        canonical = self._catalog.resolve_canonical_name(service)
+        svc_cfg = self._catalog.get_service(canonical)
+        window_start = cutoff_at - timedelta(minutes=window_minutes)
+        unit = svc_cfg.telemetry.metric_unit if svc_cfg else "ms"
+
+        if svc_cfg is None or svc_cfg.environment.lower() != environment.lower():
+            return MetricSeries(
+                status=ConnectorStatus.UNAUTHORIZED,
+                service=canonical,
+                environment=environment,
+                metric=metric,
+                unit=unit,
+                window_start=window_start,
+                window_end=cutoff_at,
+                reproducible_query=f"rest-metrics:{canonical}/{environment}",
+                coverage=0.0,
+                note=f"Service '{canonical}' in '{environment}' is not authorized in catalog.",
+            )
+
+        if not self._metrics_url:
+            return MetricSeries(
+                status=ConnectorStatus.CONNECTOR_UNAVAILABLE,
+                service=canonical,
+                environment=environment,
+                metric=metric,
+                unit=unit,
+                window_start=window_start,
+                window_end=cutoff_at,
+                reproducible_query=f"rest-metrics:{canonical}/{environment}",
+                coverage=0.0,
+                note="Metrics API URL is not configured.",
+            )
+
+        requested_minutes = max(1, min(window_minutes, 60))
+        params = {"servicio": canonical, "minutos": str(requested_minutes)}
+        query_ref = f"{self._metrics_url}?{urllib.parse.urlencode(params)}"
+        code, payload = self._client.get_json(self._metrics_url, params)
+        duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        if code in {401, 403}:
+            return MetricSeries(
+                status=ConnectorStatus.UNAUTHORIZED,
+                service=canonical,
+                environment=environment,
+                metric=metric,
+                unit=unit,
+                window_start=window_start,
+                window_end=cutoff_at,
+                reproducible_query=query_ref,
+                coverage=0.0,
+                duration_ms=duration_ms,
+                note="Metrics API returned unauthorized/forbidden.",
+            )
+        if code != 200 or not isinstance(payload, dict):
+            err_msg = payload.get("error", f"HTTP {code}") if isinstance(payload, dict) else f"HTTP {code}"
+            return MetricSeries(
+                status=ConnectorStatus.CONNECTOR_UNAVAILABLE,
+                service=canonical,
+                environment=environment,
+                metric=metric,
+                unit=unit,
+                window_start=window_start,
+                window_end=cutoff_at,
+                reproducible_query=query_ref,
+                coverage=0.0,
+                duration_ms=duration_ms,
+                note=str(err_msg),
+            )
+
+        resolved_unit = str(payload.get("unidad") or unit)
+        raw_points = payload.get("puntos", [])
+        points: list[MetricPoint] = []
+        if isinstance(raw_points, list):
+            for item in raw_points:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                ts = _parse_telemetry_timestamp(item[0], cutoff_at.tzinfo)
+                if window_start <= ts <= cutoff_at:
+                    points.append(MetricPoint(timestamp=ts, value=float(item[1])))
+        points.sort(key=lambda p: p.timestamp)
+
+        if not points:
+            return MetricSeries(
+                status=ConnectorStatus.NO_RESULTS,
+                service=canonical,
+                environment=environment,
+                metric=metric,
+                unit=resolved_unit,
+                window_start=window_start,
+                window_end=cutoff_at,
+                reproducible_query=query_ref,
+                coverage=0.0,
+                duration_ms=duration_ms,
+                note="No metrics samples in requested window.",
+            )
+
+        raw_requests = payload.get("consultas_sesion")
+        raw_errors = payload.get("errores")
+        request_volume = int(raw_requests) if raw_requests is not None else None
+        error_total = int(raw_errors) if raw_errors is not None else None
+        return _finalize_metric_series(
+            canonical=canonical,
+            environment=environment,
+            metric=metric,
+            unit=resolved_unit,
+            window_start=window_start,
+            cutoff_at=cutoff_at,
+            query_ref=query_ref,
+            points=points,
+            request_volume=request_volume,
+            error_total=error_total,
+            duration_ms=duration_ms,
+        )
+
+    def detect_anomaly(
+        self,
+        service: str,
+        environment: str,
+        metric: str,
+        cutoff_at: datetime,
+    ) -> AnomalyReport:
+        canonical = self._catalog.resolve_canonical_name(service)
+        svc_cfg = self._catalog.get_service(canonical)
+        threshold = svc_cfg.threshold_ms if svc_cfg else 800.0
+        series = self.query_metrics(canonical, environment, metric, 45, cutoff_at)
+        return compute_anomaly_and_projection(
+            series,
+            threshold=threshold,
+            cutoff_at=cutoff_at,
+        )
+
+    def search_logs(
+        self,
+        service: str,
+        environment: str,
+        pattern: str,
+        window_minutes: int,
+        cutoff_at: datetime,
+        cohort: str | None = None,
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+    ) -> LogQueryResult:
+        t0 = time.perf_counter()
+        canonical = self._catalog.resolve_canonical_name(service)
+        svc_cfg = self._catalog.get_service(canonical)
+        effective_end = min(window_end, cutoff_at) if window_end is not None else cutoff_at
+        effective_start = (
+            window_start
+            if window_start is not None
+            else (effective_end - timedelta(minutes=window_minutes))
+        )
+        if effective_start > effective_end:
+            effective_start = effective_end
+
+        if svc_cfg is None or svc_cfg.environment.lower() != environment.lower():
+            return LogQueryResult(
+                status=ConnectorStatus.UNAUTHORIZED,
+                service=canonical,
+                environment=environment,
+                pattern=pattern,
+                window_start=effective_start,
+                window_end=effective_end,
+                reproducible_query=f"rest-logs:{canonical}/{environment}",
+                coverage=0.0,
+                note=f"Service '{canonical}' in '{environment}' is not authorized in catalog.",
+            )
+
+        if not self._logs_url:
+            return LogQueryResult(
+                status=ConnectorStatus.CONNECTOR_UNAVAILABLE,
+                service=canonical,
+                environment=environment,
+                pattern=pattern,
+                window_start=effective_start,
+                window_end=effective_end,
+                reproducible_query=f"rest-logs:{canonical}/{environment}",
+                coverage=0.0,
+                note="Logs API URL is not configured.",
+            )
+
+        params = {"servicio": canonical, "limite": str(self._log_limit)}
+        query_ref = f"{self._logs_url}?{urllib.parse.urlencode(params)}"
+        code, payload = self._client.get_json(self._logs_url, params)
+        duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        if code in {401, 403}:
+            return LogQueryResult(
+                status=ConnectorStatus.UNAUTHORIZED,
+                service=canonical,
+                environment=environment,
+                pattern=pattern,
+                window_start=effective_start,
+                window_end=effective_end,
+                reproducible_query=query_ref,
+                coverage=0.0,
+                duration_ms=duration_ms,
+                note="Logs API returned unauthorized/forbidden.",
+            )
+        if code != 200:
+            err_msg = payload.get("error", f"HTTP {code}") if isinstance(payload, dict) else f"HTTP {code}"
+            return LogQueryResult(
+                status=ConnectorStatus.CONNECTOR_UNAVAILABLE,
+                service=canonical,
+                environment=environment,
+                pattern=pattern,
+                window_start=effective_start,
+                window_end=effective_end,
+                reproducible_query=query_ref,
+                coverage=0.0,
+                duration_ms=duration_ms,
+                note=str(err_msg),
+            )
+
+        if isinstance(payload, list):
+            entries = payload
+        elif isinstance(payload, dict) and isinstance(payload.get("logs"), list):
+            entries = payload["logs"]
+        else:
+            return LogQueryResult(
+                status=ConnectorStatus.CONNECTOR_UNAVAILABLE,
+                service=canonical,
+                environment=environment,
+                pattern=pattern,
+                window_start=effective_start,
+                window_end=effective_end,
+                reproducible_query=query_ref,
+                coverage=0.0,
+                duration_ms=duration_ms,
+                note="Unexpected Logs API response format.",
+            )
+
+        total = 0
+        first_seen: datetime | None = None
+        examples: list[str] = []
+        cohort_counts: dict[str, int] = {}
+        cohort_requests: dict[str, int] = {}
+        lowered_pattern = pattern.lower()
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_service = entry.get("servicio") or entry.get("service")
+            if entry_service is not None:
+                resolved_entry_svc = self._catalog.resolve_canonical_name(str(entry_service))
+                if resolved_entry_svc.lower() != canonical.lower():
+                    continue
+            raw_ts = entry.get("fecha") or entry.get("timestamp")
+            if raw_ts is None:
+                continue
+            ts = _parse_telemetry_timestamp(raw_ts, effective_end.tzinfo)
+            if not (effective_start <= ts <= effective_end):
+                continue
+
+            entry_cohort = str(
+                entry.get("cohort") or entry.get("cohorte") or entry.get("fase") or "default"
+            )
+            if cohort is not None and entry_cohort != cohort:
+                continue
+
+            cohort_requests[entry_cohort] = cohort_requests.get(entry_cohort, 0) + 1
+
+            raw_status = entry.get("status")
+            http_status = int(raw_status) if isinstance(raw_status, (int, float)) else None
+            level = str(entry.get("nivel") or entry.get("level") or "").upper()
+            parts = [
+                f"{entry.get('metodo', '')} {entry.get('endpoint', '')}".strip(),
+                f"status={raw_status}" if raw_status is not None else "",
+                f"latencia_ms={entry['latencia_ms']}" if entry.get("latencia_ms") is not None else "",
+                f"fase={entry['fase']}" if entry.get("fase") is not None else "",
+                str(entry.get("mensaje") or entry.get("message") or entry.get("error") or ""),
+            ]
+            message = " ".join(part for part in parts if part).strip()
+            searchable_lower = message.lower()
+
+            if lowered_pattern == "*":
+                if not _is_error_log_entry(searchable_lower, level=level, http_status=http_status):
+                    continue
+            elif lowered_pattern not in searchable_lower:
+                continue
+
+            total += 1
+            cohort_counts[entry_cohort] = cohort_counts.get(entry_cohort, 0) + 1
+            if first_seen is None or ts < first_seen:
+                first_seen = ts
+            if len(examples) < 3:
+                examples.append(
+                    redact_sensitive_text(f"{ts.isoformat()} [{entry_cohort}] {message}")
+                )
+
+        return _finalize_log_query_result(
+            canonical=canonical,
+            environment=environment,
+            pattern=pattern,
+            effective_start=effective_start,
+            effective_end=effective_end,
+            query_ref=query_ref,
+            total=total,
+            first_seen=first_seen,
+            examples=examples,
+            cohort_counts=cohort_counts,
+            cohort_requests=cohort_requests,
+            cohort=cohort,
+            duration_ms=duration_ms,
         )
 
