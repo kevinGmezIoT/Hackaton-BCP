@@ -373,7 +373,7 @@ def test_turn_types_explanation_chat_approval_ambiguous_now_idempotency_and_sse(
         app = VigiaHttpApp(service, require_user_auth=True, auto_process_alerts=False)
         hdrs = {"Authorization": f"Bearer {app.issue_session_token('alice', ['transfers-squad'])}"}
 
-        # 1. Ambiguous "¿Y ahora?" with no prior metric/service turn asks clarifying question, 0 revisions.
+        # 1. A message without content asks for clarification, without creating a revision.
         ambig = app.handle_request(
             "POST",
             f"/api/casos/{case.case_id}/mensajes",
@@ -381,7 +381,7 @@ def test_turn_types_explanation_chat_approval_ambiguous_now_idempotency_and_sse(
             body=json.dumps(
                 {
                     "client_message_id": "m-1",
-                    "text": "¿Y ahora?",
+                    "text": "???",
                     "base_revision": 1,
                 }
             ),

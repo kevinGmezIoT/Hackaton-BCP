@@ -312,7 +312,9 @@ class BridgeRelay:
                 task()
                 delay = 0.3
             except (OSError, ValueError, ApprovalError, RuntimeError) as exc:
-                log.warning("Puente UI (%s): %s", task.__name__, exc)
+                target = urlsplit(self.client.url)
+                log.warning("Puente UI (%s, %s:%s): %s", task.__name__, target.hostname,
+                            target.port or (443 if target.scheme == "https" else 80), exc)
                 delay = min(delay * 2, 10)
             self.stop_event.wait(delay)
 

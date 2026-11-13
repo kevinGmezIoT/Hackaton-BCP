@@ -987,10 +987,28 @@ def create_http_server(
 
     class _Handler(BaseHTTPRequestHandler):
         def _dispatch(self) -> None:
+            started = time.monotonic()
+            path = urllib.parse.urlsplit(self.path).path
+            print(f"[vigia-http] Recibido {self.command} {path} desde {self.client_address[0]}",
+                  file=sys.stderr, flush=True)
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw_body = self.rfile.read(length) if length > 0 else b""
             hdrs = {k: v for k, v in self.headers.items()}
-            resp = app.handle_request(self.command, self.path, headers=hdrs, body=raw_body)
+            try:
+                resp = app.handle_request(self.command, self.path, headers=hdrs, body=raw_body)
+            except Exception as exc:
+                print(f"[vigia-http] Error en {self.command} {path}: {type(exc).__name__}",
+                      file=sys.stderr, flush=True)
+                resp = app._json_response(500, {"error": "Error interno al procesar la petición."})
+            case_id = ""
+            if resp.headers.get("Content-Type", "").startswith("application/json"):
+                data = json.loads(resp.body)
+                if isinstance(data, dict):
+                    case_id = data.get("caso") or data.get("case_id") or ""
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            case_note = f" caso={case_id}" if case_id else ""
+            print(f"[vigia-http] {self.command} {path} -> {resp.status_code}{case_note} ({elapsed_ms} ms)",
+                  file=sys.stderr, flush=True)
             encoded = resp.body.encode("utf-8")
             self.send_response(resp.status_code)
             for k, v in resp.headers.items():

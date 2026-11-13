@@ -17,6 +17,8 @@ pytest.importorskip("fastapi")
 from test_decisions import _run_investigator_to_proposal
 from vigia.adapters.inbound.http_api import VigiaHttpApp, create_http_server, CaseWorkWorker
 from vigia.adapters.outbound.ui_bridge import BridgeClient, BridgeRelay
+from vigia.adapters.inbound.bridge_api import BridgeAgentApi
+from vigia.domain.contracts import ConnectorStatus
 
 
 @pytest.fixture()
@@ -31,6 +33,82 @@ def frontend(monkeypatch):
     monkeypatch.setattr(main, "TOKEN", "integration-token")
     monkeypatch.setattr(main, "AGENTE_URL", "")
     return main
+
+
+def test_manual_investigation_accepts_empty_metrics(transfers_workspace, monkeypatch, capsys):
+    service, case, _ = _run_investigator_to_proposal(transfers_workspace)
+    try:
+        telemetry = service._deps.telemetry
+        series = telemetry.query_metrics("transferencias", "production", "latency_p95_ms",
+                                         30, case.alert.effective_cutoff)
+        empty = series.model_copy(update={"status": ConnectorStatus.NO_RESULTS, "points": [],
+                                          "note": "No metrics samples in requested window."})
+        monkeypatch.setattr(telemetry, "query_metrics", lambda *args, **kwargs: empty)
+        api = BridgeAgentApi(service, "integration-token")
+        status, result = api.handle(api.investigate_path, "integration-token",
+                                    '{"servicio":"transferencias"}')
+        assert status == 202
+        opened = service.get_case(result["caso"])
+        assert opened.alert.current_value is None
+        assert "Métricas no disponibles" in opened.alert.symptom
+        assert service.get_case(case.case_id).proposal is not None
+        output = capsys.readouterr().err
+        assert "estado=no_results muestras=0" in output
+        assert "Se continúa el diagnóstico" in output
+        assert "integration-token" not in output
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "timeout"])
+def test_diagnosis_reads_code_and_logs_without_metrics(transfers_workspace, monkeypatch, failure):
+    from datetime import datetime
+    from conftest import ScriptedChatModel
+    from langchain_core.messages import AIMessage
+    from vigia.runtime import build_case_service
+    from vigia.domain.contracts import CaseStatus
+
+    ws = transfers_workspace
+    cutoff = datetime.fromisoformat("2026-11-12T09:12:00-05:00")
+    model = ScriptedChatModel(responses=[
+        AIMessage(content="", tool_calls=[{"id": "metric", "name": "query_metrics",
+                                          "args": {"service": "transferencias"}}]),
+        AIMessage(content="", tool_calls=[
+            {"id": "release", "name": "list_changes", "args": {"service": "pagos-core"}},
+            {"id": "code", "name": "read_snippet", "args": {"repository": "applications/pagos-core",
+             "sha": ws.deployed_sha, "path": "src/pool.py", "start_line": 1, "end_line": 20}},
+            {"id": "logs", "name": "search_logs", "args": {"service": "pagos-core",
+             "pattern": "Connection pool exhausted"}}]),
+        AIMessage(content="Diagnóstico parcial: revisar el pool y los errores tras CHG-4821. "
+                          "La latencia y el margen requieren métricas.")])
+    service, _, _ = build_case_service(
+        fixtures_dir=ws.fixtures_dir, authorized_repos={"applications/pagos-core": ws.repo_dir},
+        model=model, clock=lambda: cutoff)
+    telemetry = service._deps.telemetry
+    original = telemetry.query_metrics
+    def missing(*args, **kwargs):
+        if failure == "timeout":
+            raise TimeoutError("Metrics timeout")
+        return original(*args, **kwargs).model_copy(update={
+            "status": ConnectorStatus.CONNECTOR_UNAVAILABLE, "points": [], "current_value": None})
+    monkeypatch.setattr(telemetry, "query_metrics", missing)
+    try:
+        api = BridgeAgentApi(service, "test-token")
+        status, result = api.handle(api.investigate_path, "test-token", '{"servicio":"transferencias"}')
+        assert status == 202
+        if failure == "timeout":
+            # The bootstrap timed out. Subsequent tool reads return an unavailable result.
+            monkeypatch.setattr(telemetry, "query_metrics", lambda *args, **kwargs:
+                original(*args, **kwargs).model_copy(update={
+                    "status": ConnectorStatus.CONNECTOR_UNAVAILABLE, "points": [], "current_value": None}))
+        diagnosed = service.process_pending_work(result["caso"])
+        assert diagnosed.status == CaseStatus.INCONCLUSIVE
+        assert {"change_log", "git_show", "logs"} <= {ev.source for ev in diagnosed.evidence}
+        assert diagnosed.connector_gaps
+        assert diagnosed.alert.current_value is None and diagnosed.proposal is None
+        assert "Diagnóstico parcial" in diagnosed.final_summary
+    finally:
+        service.close()
 
 
 @contextmanager
@@ -87,7 +165,7 @@ def test_real_bridge_roundtrip_and_restart(frontend, transfers_workspace, tmp_pa
             service.close()
 
 
-def test_remote_chat_uses_case_context_and_preserves_token_boundary(frontend, transfers_workspace, monkeypatch):
+def test_remote_chat_uses_case_context_and_preserves_token_boundary(frontend, transfers_workspace, monkeypatch, capsys):
     from test_conversational import _write_two_release_manifest, _write_logs_for_variant, _open_initial_case
     _write_two_release_manifest(transfers_workspace)
     _write_logs_for_variant(transfers_workspace, "causal_change")
@@ -115,6 +193,20 @@ def test_remote_chat_uses_case_context_and_preserves_token_boundary(frontend, tr
             assert ui.post("/api/chat", json={"mensaje": "¿Por qué recomiendas revertir?"}).status_code == 200
             assert len(service.list_messages(case.case_id)) == 3
             assert service.get_case(case.case_id).decision is None
+            from test_chat_questions import ContextModel
+            from langchain_core.messages import AIMessage
+            original_model = service._investigator._model
+            monkeypatch.setattr(service, "_clock", lambda: case.alert.effective_cutoff)
+            service._investigator._model = ContextModel(responses=[
+                AIMessage(content="", tool_calls=[{"id": "latest", "name": "query_metrics",
+                    "args": {"service": "transferencias", "metric": "latency_p95_ms"}}]),
+                AIMessage(content="La última medición de la ventana es 420 ms.")])
+            natural = ui.post("/api/chat", json={"mensaje": "cuanto fue la ultima latencia registrada?"})
+            assert natural.status_code == 200
+            assert "420 ms" in natural.json()["respuesta"]
+            assert natural.json()["herramientas"] == ["query_metrics"]
+            assert service.get_case(case.case_id).proposal.version == 1
+            service._investigator._model = original_model
             follow = ui.post("/api/chat", json={"mensaje": "¿Y si fue el tráfico? Compara las tasas."})
             assert follow.status_code == 200
             assert follow.json()["respuesta"] and follow.json()["fuentes"]
@@ -136,6 +228,12 @@ def test_remote_chat_uses_case_context_and_preserves_token_boundary(frontend, tr
         thread.join()
         worker.stop()
         service.close()
+    logs = capsys.readouterr().err
+    assert "[vigia-http] Recibido POST /chat" in logs
+    assert "[vigia-http] POST /chat -> 401" in logs
+    assert "[vigia-http] POST /investigar -> 202 caso=" in logs
+    assert "[vigia-worker] Iniciando" in logs
+    assert "integration-token" not in logs
 
 
 @pytest.mark.parametrize("variant", ["causal_change", "shared_load"])

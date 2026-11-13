@@ -1058,7 +1058,9 @@ class SqliteCaseStoreAdapter:
                     in {ProposalStatus.APPROVED, ProposalStatus.EXECUTED, ProposalStatus.REJECTED}
                 )
 
-                if base_revision != current_rev or approval_won:
+                informational = turn.intent == ConversationIntent.GENERAL_QUESTION
+                historical = base_revision != current_rev or approval_won
+                if historical or informational:
                     added_ids = self._merge_follow_up_evidence_in_tx(
                         case, updated_case_snapshot, current_rev
                     )
@@ -1069,10 +1071,15 @@ class SqliteCaseStoreAdapter:
                         dict.fromkeys([*candidate.cited_evidence_ids, *added_ids])
                     )
                     turn.pending_data = list(candidate.missing_data)
-                    turn.result_outcome = "superseded_by_concurrent_update"
+                    turn.result_outcome = (
+                        "superseded_by_concurrent_update" if historical
+                        else "answered_from_dossier" if candidate.used_existing_evidence_only
+                        else "answered_with_tools"
+                    )
                     turn.published_revision = current_rev
                     turn.work_summary = (
-                        f"Follow-up completed after approval/newer revision {current_rev}; preserved as historical note."
+                        f"Historical follow-up on active revision {current_rev}." if historical
+                        else f"Question answered using case revision {current_rev}."
                     )
                     turn.updated_at = now
                     case.conversation_turns = [
@@ -1086,7 +1093,7 @@ class SqliteCaseStoreAdapter:
                         case_id=case_id,
                         timestamp=now,
                         role="Investigator",
-                        summary=f"[{turn_id}] Historical follow-up recorded (active revision={current_rev}).",
+                        summary=f"[{turn_id}] {turn.work_summary}",
                         references=turn.referenced_evidence_ids,
                         payload={
                             "turn_id": turn_id,

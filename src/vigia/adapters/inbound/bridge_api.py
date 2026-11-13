@@ -7,6 +7,7 @@ import json
 import os
 import uuid
 import time
+import sys
 
 from pydantic import ValidationError
 
@@ -50,17 +51,33 @@ class BridgeAgentApi:
             raise UnknownServiceError("Servicio ausente del catálogo.")
         now = self.service._now()
         metric = config.telemetry.impact_metric
-        reading = self.service._deps.telemetry.query_metrics(
-            config.service, config.environment, metric, 30, now)
-        if reading.status != ConnectorStatus.OK or not reading.points:
-            return 503, {"error": "No hay telemetría disponible para iniciar esta investigación."}
+        current_value = None
+        symptom = "Revisión solicitada desde la consola."
+        try:
+            reading = self.service._deps.telemetry.query_metrics(
+                config.service, config.environment, metric, 30, now)
+            print(
+                f"[vigia-telemetria] servicio={config.service} metrica={metric} "
+                f"estado={reading.status.value} muestras={len(reading.points)} "
+                f"ventana={reading.window_start.isoformat()}..{reading.window_end.isoformat()}",
+                file=sys.stderr, flush=True,
+            )
+            if reading.status == ConnectorStatus.OK and reading.points:
+                current_value = reading.current_value
+            else:
+                symptom += f" Métricas no disponibles ({reading.status.value})."
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            symptom += f" Falló la lectura de métricas ({type(exc).__name__})."
+        if current_value is None:
+            print("[vigia-telemetria] Se continúa el diagnóstico con logs, despliegues y código; "
+                  "latencia y margen pendientes de medición.", file=sys.stderr, flush=True)
         key = request.get("client_message_id") or str(uuid.uuid4())
         result = self.service.ingest_alert(AlertEnvelope(
             source="puente-ui", event_id=str(key), episode_id=f"manual-{key}",
             alert=Alert(case_id=f"CASE-{uuid.uuid4().hex}", service=config.service,
                         environment=config.environment, metric=metric,
-                        observed_at=now, cutoff_at=now, current_value=reading.current_value,
-                        threshold_value=config.threshold_ms, symptom="Revisión solicitada desde la consola")))
+                        observed_at=now, cutoff_at=now, current_value=current_value,
+                        threshold_value=config.threshold_ms, symptom=symptom)))
         return 202, {"caso": result.case_id}
 
     def chat(self, request: dict) -> tuple[int, dict]:
@@ -83,7 +100,7 @@ class BridgeAgentApi:
         turn = next(t for t in self.service.list_messages(case_id) if t.turn_id == turn_id)
         case = self.service.get_case(case_id)
         tools = [e.tool_name for e in case.events
-                 if e.tool_name and set(e.references) & set(turn.referenced_evidence_ids)]
+                 if e.tool_name and e.payload.get("turn_id") == turn_id]
         return (202 if turn.status.value in {"pending", "in_progress"} else 200), {
             "caso": case_id, "turno": turn.turn_id, "estado": turn.status.value,
             "respuesta": turn.answer, "herramientas": list(dict.fromkeys(tools)),

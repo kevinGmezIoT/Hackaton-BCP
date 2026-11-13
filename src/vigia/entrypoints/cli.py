@@ -486,7 +486,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("VIGIA_MODEL", "google_genai:gemini-2.5-flash"),
+        default=os.environ.get("VIGIA_MODEL", "google_genai:gemini-3.5-flash"),
         help="LangChain model identifier (or set VIGIA_MODEL).",
     )
     parser.add_argument(

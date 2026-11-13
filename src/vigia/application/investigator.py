@@ -182,8 +182,10 @@ class InvestigatorAgent:
             if t.turn_id != turn.turn_id and t.answer
         ]
         ev_summaries = [
-            f"[{ev.evidence_id}] ({ev.source}, rev={ev.revision_number}): {ev.observed_fact[:160]}"
+            f"[{ev.evidence_id}] ({ev.source}, rev={ev.revision_number}, "
+            f"observed_at={ev.observed_at.isoformat()}): {ev.observed_fact[:160]}"
             for ev in working_case.evidence
+            if ev.observed_at <= target_cutoff
         ]
         user_prompt = build_follow_up_user_prompt(
             working_case.case_id,
@@ -196,6 +198,19 @@ class InvestigatorAgent:
             previous_turns_summary=prev_summaries,
             existing_evidence_summary=ev_summaries,
             existing_gaps=working_case.connector_gaps,
+            metric=working_case.alert.metric,
+            case_summary=(
+                f"status={working_case.status.value}; "
+                f"alert_observed_at={working_case.alert.observed_at.isoformat()}; "
+                f"alert_value={working_case.alert.current_value}; "
+                f"symptom={working_case.alert.symptom}; "
+                f"diagnosis={working_case.final_summary[:4000]}"
+            ),
+            proposal_summary=(
+                f"{working_case.proposal.action.value}: "
+                f"{working_case.proposal.justification}"
+                if working_case.proposal else "No action proposal is registered."
+            ),
         )
         result = agent.invoke(
             {"messages": [HumanMessage(content=user_prompt)]},
@@ -203,6 +218,9 @@ class InvestigatorAgent:
         )
         messages = result.get("messages", [])
         final_text = _extract_message_text(messages[-1]) if messages else ""
+        for event in working_case.events:
+            if event.sequence_id == 0:
+                event.payload = {**event.payload, "turn_id": turn.turn_id}
 
         cited_ids = list(dict.fromkeys(toolkit.recorded_evidence_ids))
         if not cited_ids:

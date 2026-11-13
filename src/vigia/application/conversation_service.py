@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime, timedelta
 
 from vigia.adapters.outbound.case_store import StaleRevisionError
@@ -91,31 +92,14 @@ _STATUS_KEYWORDS = (
 )
 
 
-def _has_clear_target_in_prior_turn(case: CaseRecord, text: str) -> bool:
-    """Check if the current text or prior turn makes service and metric unambiguous."""
-    lowered = text.lower()
-    metric_tokens = ("latencia", "latency", "p95", "error", "tasa", "rate", "pool", "cpu")
-    if any(tok in lowered for tok in metric_tokens):
-        return True
-    if not case.conversation_turns:
-        return False
-    prev = case.conversation_turns[-1]
-    prev_text = f"{prev.question} {prev.answer}".lower()
-    has_metric = any(tok in prev_text for tok in metric_tokens)
-    has_service = (
-        case.alert.service.lower() in prev_text
-        or (case.proposal is not None and case.proposal.target_service.lower() in prev_text)
-        or prev.comparison is not None
-    )
-    return has_metric and has_service
-
-
 def classify_turn(
     case: CaseRecord,
     text: str,
 ) -> tuple[ConversationIntent, bool, str | None]:
     """Classify an operator chat turn and decide whether it challenges an active proposal."""
     lowered = re.sub(r"\s+", " ", text.strip().lower())
+    if not any(char.isalnum() for char in lowered):
+        return ConversationIntent.AMBIGUOUS, False, None
 
     if any(verb in lowered for verb in _APPROVAL_VERBS):
         return ConversationIntent.APPROVAL_REQUEST, False, None
@@ -124,14 +108,12 @@ def classify_turn(
         return ConversationIntent.CHALLENGE_HYPOTHESIS, True, text.strip()
 
     if any(kw in lowered for kw in _STATUS_KEYWORDS):
-        if _has_clear_target_in_prior_turn(case, lowered):
-            return ConversationIntent.CURRENT_STATUS, False, None
-        return ConversationIntent.AMBIGUOUS, False, None
+        return ConversationIntent.CURRENT_STATUS, False, None
 
     if any(kw in lowered for kw in _EXPLAIN_KEYWORDS):
         return ConversationIntent.EXPLAIN_PROPOSAL, False, None
 
-    return ConversationIntent.AMBIGUOUS, False, None
+    return ConversationIntent.GENERAL_QUESTION, False, None
 
 
 def format_dossier_explanation(
@@ -329,7 +311,7 @@ class ConversationService:
                 f"Puedo explicar la evidencia actual, comprobar tasas por cohorte o revisar el estado actual de `{case.alert.service}`."
             )
             immediate_outcome = "ask_clarification"
-        elif intent == ConversationIntent.CURRENT_STATUS:
+        elif intent in {ConversationIntent.CURRENT_STATUS, ConversationIntent.GENERAL_QUESTION}:
             target_cutoff = now
         elif intent == ConversationIntent.CHALLENGE_HYPOTHESIS:
             target_svc = (
@@ -398,6 +380,9 @@ class ConversationService:
             immediate_outcome=immediate_outcome,
             immediate_evidence_ids=immediate_refs,
         )
+        print(f"[vigia-chat] caso={case_id} turno={turn.turn_id} "
+              f"intencion={turn.intent.value} estado={turn.status.value}",
+              file=sys.stderr, flush=True)
         return ChatSubmissionResult(
             turn_id=turn.turn_id,
             case_id=case_id,

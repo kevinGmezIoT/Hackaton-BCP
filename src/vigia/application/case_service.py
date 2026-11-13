@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
@@ -294,6 +295,8 @@ class CaseService:
             )
             return None
 
+        print(f"[vigia-worker] Iniciando {work.work_type} caso={case.case_id} servicio={case.alert.service}",
+              file=sys.stderr, flush=True)
         if work.work_type == "follow_up":
             turn_id = str(work.payload.get("turn_id") or "")
             try:
@@ -313,10 +316,14 @@ class CaseService:
                 status="completed",
                 worker_id=effective_worker,
             )
+            print(f"[vigia-worker] Finalizado caso={updated.case_id} estado={updated.status.value}",
+                  file=sys.stderr, flush=True)
             return updated
 
         svc_cfg = self._deps.catalog.get_service(case.alert.service)
         updated = self._investigator.run(case, self._deps, svc_cfg)
+        print(f"[vigia-worker] Finalizado caso={updated.case_id} estado={updated.status.value}",
+              file=sys.stderr, flush=True)
         self._store.complete_work(
             work.work_id,
             last_step_index=len(updated.evidence),

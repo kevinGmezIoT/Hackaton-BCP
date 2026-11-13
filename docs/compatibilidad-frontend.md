@@ -30,7 +30,9 @@ En Vigía se mantienen las rutas de callback `/chat`, `/investigar` y `/decision
 
 El puente envía `POST /chat` con `{mensaje}`. Vigía selecciona el caso más reciente del servicio configurado, incorpora el expediente y devuelve `{respuesta, herramientas, fuentes}`. Una pregunta que requiere nuevas consultas se encola en el trabajador existente. La respuesta HTTP espera hasta `VIGIA_BRIDGE_CHAT_TIMEOUT` segundos, por defecto 45, dentro del límite de 60 segundos del puente. Si sigue pendiente, el agente devuelve 504 y el caso conserva el trabajo en curso.
 
-El callback `POST /investigar` recibe `{servicio}`, consulta telemetría disponible y abre una investigación con una hora de corte nueva. Si la fuente carece de muestras devuelve un error explícito. La respuesta `{caso}` identifica el expediente que luego aparece por sus eventos.
+Las preguntas libres, como «cómo van los logs del servicio» o «cuánto fue la última latencia registrada», se envían al modelo con servicio, métrica, diagnóstico, evidencias y conversación previa. Los mensajes cortos pueden apoyarse en ese contexto. El modelo puede responder con datos del expediente o consultar herramientas de lectura. Una pregunta informativa conserva la propuesta y la revisión diagnóstica vigentes, incluso si la aprobación está bloqueada por una reevaluación. La consola registra la intención y el estado del turno con el prefijo `[vigia-chat]`.
+
+El callback `POST /investigar` recibe `{servicio}` y abre una investigación con una hora de corte nueva. Si la fuente carece de muestras o falla, responde igualmente 202 y registra esa limitación en la alerta. Vigía continúa con logs, cambios, código y procedimientos. La latencia actual y el margen quedan pendientes de medición. La respuesta `{caso}` identifica el expediente que luego aparece por sus eventos.
 
 El callback `POST /decision` confirma la recepción del aviso directo del puente. El voto definitivo se consume por long-poll, con una sola ruta para invocar al servicio de aprobaciones. Los tres callbacks exigen `X-Vigia-Token` con el secreto acordado.
 

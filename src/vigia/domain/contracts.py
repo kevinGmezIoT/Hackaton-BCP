@@ -103,6 +103,7 @@ class ConversationIntent(str, Enum):
     CURRENT_STATUS = "current_status"
     APPROVAL_REQUEST = "approval_request"
     AMBIGUOUS = "ambiguous"
+    GENERAL_QUESTION = "general_question"
 
 
 class ComparisonVerdict(str, Enum):
