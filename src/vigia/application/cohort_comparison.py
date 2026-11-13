@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import re
 
 from vigia.domain.contracts import (
     CaseRecord,
@@ -107,19 +108,92 @@ def _extract_windows(
     return windows
 
 
+_PATTERN_HINTS = (
+    "connection pool exhausted",
+    "deadlock",
+    "timeout",
+    "timed out",
+    "oom",
+    "5xx",
+    "504",
+    "503",
+    "502",
+    "500",
+    "429",
+)
+
+
+def infer_error_definition(text: str) -> str:
+    """Extract an explicit error filter requested by an operator, defaulting to '*'."""
+    quoted = re.search(r"['\"]([^'\"]{3,64})['\"]", text)
+    if quoted:
+        return quoted.group(1).strip()
+    lowered = text.lower()
+    for hint in _PATTERN_HINTS:
+        if hint in lowered:
+            return hint
+    return "*"
+
+
+def compute_comparison_windows(
+    *,
+    deployed_at: datetime,
+    cutoff_at: datetime,
+    window_minutes: int | None = None,
+) -> tuple[datetime, datetime, datetime, datetime, timedelta]:
+    """Derive aligned pre/post-deployment comparison bounds for a cutoff."""
+    if cutoff_at > deployed_at:
+        raw_duration = cutoff_at - deployed_at
+    else:
+        raw_duration = timedelta(minutes=15)
+    if window_minutes is not None:
+        raw_duration = min(raw_duration, timedelta(minutes=max(1, window_minutes)))
+    duration = max(timedelta(minutes=1), raw_duration)
+    post_start = deployed_at
+    post_end = cutoff_at if cutoff_at > deployed_at else (deployed_at + duration)
+    pre_end = deployed_at - timedelta(seconds=1)
+    pre_start = pre_end - (post_end - post_start)
+    return pre_start, pre_end, post_start, post_end, duration
+
+
 def find_reusable_comparison(
     case: CaseRecord,
     *,
     service: str,
     cutoff_at: datetime,
+    release_id: str | None = None,
+    window: str | None = None,
+    cohorts: set[str] | None = None,
+    error_definition: str = "*",
 ) -> Evidence | None:
-    """Return existing dossier evidence if a valid cohort comparison already covers this cutoff."""
+    """Return existing conclusive dossier evidence matching service, cutoff, release, window, cohorts, and error definition."""
     target_cutoff = cutoff_at.isoformat()
+    expected_def = error_definition.strip().lower() or "*"
+    conclusive_results = {
+        ComparisonVerdict.SUPPORTS_CAUSAL_CHANGE.value,
+        ComparisonVerdict.CONTRADICTS_DEPLOYMENT.value,
+    }
     for ev in reversed(case.evidence):
         if ev.service.lower() != service.lower():
             continue
-        if ev.observation_type == "cohort_comparison" and ev.observed_at.isoformat() == target_cutoff:
-            return ev
+        if ev.observation_type != "cohort_comparison":
+            continue
+        if ev.comparison_result not in conclusive_results:
+            continue
+        if ev.observed_at.isoformat() != target_cutoff:
+            continue
+        if release_id is not None and ev.revision != release_id:
+            continue
+        if window is not None and ev.window != window:
+            continue
+        ev_def = (ev.error_definition or "*").strip().lower()
+        if ev_def != expected_def:
+            continue
+        if cohorts:
+            recorded_cohorts = {c.strip() for c in (ev.cohort or "").split(",") if c.strip()}
+            if not cohorts.issubset(recorded_cohorts):
+                continue
+        return ev
     return None
 
 
@@ -148,18 +222,11 @@ def compare_service_cohort_rates(
     deployed_at = active_release.deployed_at if active_release else (cutoff_at - timedelta(minutes=15))
     release_id = active_release.release_id if active_release else None
 
-    if cutoff_at > deployed_at:
-        raw_duration = cutoff_at - deployed_at
-    else:
-        raw_duration = timedelta(minutes=15)
-    if window_minutes is not None:
-        raw_duration = min(raw_duration, timedelta(minutes=max(1, window_minutes)))
-    duration = max(timedelta(minutes=1), raw_duration)
-
-    post_start = deployed_at
-    post_end = cutoff_at if cutoff_at > deployed_at else (deployed_at + duration)
-    pre_end = deployed_at - timedelta(seconds=1)
-    pre_start = pre_end - (post_end - post_start)
+    pre_start, pre_end, post_start, post_end, duration = compute_comparison_windows(
+        deployed_at=deployed_at,
+        cutoff_at=cutoff_at,
+        window_minutes=window_minutes,
+    )
 
     missing_data: list[str] = []
     limitations: list[str] = []
@@ -344,6 +411,7 @@ def compare_service_cohort_rates(
         windows=all_windows,
         pre_total_requests=pre_total_requests,
         post_total_requests=post_total_requests,
+        error_definition=pattern,
         shared_resource_saturated=shared_saturated,
         verdict=verdict,
         missing_data=missing_data,

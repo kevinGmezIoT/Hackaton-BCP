@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from vigia.adapters.outbound.http_telemetry import HttpGetFn, _default_http_get
@@ -16,6 +16,37 @@ from vigia.domain.contracts import (
     Release,
     ReleaseResolution,
 )
+
+
+def _parse_github_timestamp(raw: Any) -> datetime | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _map_github_deployment_state(raw_state: str | None) -> str:
+    if raw_state is None:
+        return "unknown"
+    normalized = raw_state.strip().lower()
+    if normalized in {"active", "success"}:
+        return "active"
+    if normalized == "canary":
+        return "canary"
+    if normalized == "inactive":
+        return "inactive"
+    if normalized in {"failure", "error", "failed"}:
+        return "failed"
+    if normalized in {"queued", "pending", "in_progress"}:
+        return "pending"
+    if normalized == "rolled_back":
+        return "rolled_back"
+    return normalized or "unknown"
 
 
 class GitHubReleaseSourceAdapter:
@@ -47,6 +78,69 @@ class GitHubReleaseSourceAdapter:
             headers["Authorization"] = f"Bearer {self._auth_token}"
         return headers
 
+    def _get_json_with_retry(
+        self, url: str, params: dict[str, str]
+    ) -> tuple[int, Any]:
+        while True:
+            try:
+                code, payload = self._http_get(url, params, self._headers())
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                code, payload = 503, {"error": str(exc)}
+            if code in {502, 503, 504} and self._retries_used < self._max_retries:
+                self._retries_used += 1
+                continue
+            return code, payload
+
+    def _resolve_deployment_status(
+        self, repo: str, item: dict[str, Any], rel_id: str
+    ) -> tuple[ConnectorStatus, str, str]:
+        if rel_id in self._rolled_back:
+            return ConnectorStatus.OK, "rolled_back", ""
+        if "status" in item and item["status"] is not None:
+            return ConnectorStatus.OK, _map_github_deployment_state(str(item["status"])), ""
+
+        statuses_payload: Any = item.get("statuses")
+        if statuses_payload is None:
+            raw_id = item.get("id")
+            statuses_url = str(
+                item.get("statuses_url")
+                or f"{self._base_url}/repos/{repo}/deployments/{raw_id}/statuses"
+            )
+            code, statuses_payload = self._get_json_with_retry(statuses_url, {})
+            if code in {401, 403}:
+                return (
+                    ConnectorStatus.UNAUTHORIZED,
+                    "unknown",
+                    "GitHub deployment statuses permission denied.",
+                )
+            if code != 200:
+                err_msg = (
+                    statuses_payload.get("error", f"HTTP {code}")
+                    if isinstance(statuses_payload, dict)
+                    else f"HTTP {code}"
+                )
+                return ConnectorStatus.CONNECTOR_UNAVAILABLE, "unknown", str(err_msg)
+
+        statuses = (
+            statuses_payload
+            if isinstance(statuses_payload, list)
+            else statuses_payload.get("statuses", []) if isinstance(statuses_payload, dict) else []
+        )
+        if not statuses:
+            return ConnectorStatus.OK, "pending", ""
+
+        # GitHub returns deployment statuses newest-first, or with created_at timestamps.
+        if any(isinstance(s, dict) and s.get("created_at") for s in statuses):
+            latest = max(
+                (s for s in statuses if isinstance(s, dict)),
+                key=lambda s: _parse_github_timestamp(s.get("created_at"))
+                or datetime.min.replace(tzinfo=timezone.utc),
+            )
+        else:
+            latest = statuses[0]
+        raw_state = latest.get("state") if isinstance(latest, dict) else None
+        return ConnectorStatus.OK, _map_github_deployment_state(raw_state), ""
+
     def _fetch_deployments(
         self, service: str, environment: str
     ) -> tuple[ConnectorStatus, list[Release], str]:
@@ -59,42 +153,53 @@ class GitHubReleaseSourceAdapter:
             )
         url = f"{self._base_url}/repos/{repo}/deployments"
         params = {"environment": environment}
-        while True:
-            try:
-                code, payload = self._http_get(url, params, self._headers())
-            except (TimeoutError, ConnectionError, OSError) as exc:
-                code, payload = 503, {"error": str(exc)}
-            if code in {502, 503, 504} and self._retries_used < self._max_retries:
-                self._retries_used += 1
-                continue
-            break
+        code, payload = self._get_json_with_retry(url, params)
 
         if code in {401, 403}:
             return ConnectorStatus.UNAUTHORIZED, [], "GitHub Deployments permission denied."
         if code != 200:
+            err_msg = payload.get("error", f"HTTP {code}") if isinstance(payload, dict) else f"HTTP {code}"
             return (
                 ConnectorStatus.CONNECTOR_UNAVAILABLE,
                 [],
-                str(payload.get("error", f"HTTP {code}")),
+                str(err_msg),
             )
 
         raw_list = payload.get("deployments", []) if isinstance(payload, dict) else payload
+        if not isinstance(raw_list, list):
+            return ConnectorStatus.CONNECTOR_UNAVAILABLE, [], "Unexpected GitHub deployments response."
+
         releases: list[Release] = []
         for item in raw_list:
-            rel_id = str(item.get("release_id") or item.get("id"))
-            status = "rolled_back" if rel_id in self._rolled_back else str(item.get("status", "active"))
+            dep_payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            rel_id = str(
+                item.get("release_id")
+                or dep_payload.get("release_id")
+                or item.get("id")
+                or ""
+            )
+            deployed_dt = _parse_github_timestamp(
+                item.get("deployed_at") or item.get("created_at") or item.get("updated_at")
+            )
+            if not rel_id or deployed_dt is None:
+                continue
+            status_conn, status, status_note = self._resolve_deployment_status(repo, item, rel_id)
+            if status_conn != ConnectorStatus.OK:
+                return status_conn, [], status_note
             releases.append(
                 Release(
                     release_id=rel_id,
                     service=service,
-                    environment=str(item.get("environment", environment)),
-                    deployed_at=datetime.fromisoformat(str(item["deployed_at"])),
-                    previous_sha=str(item.get("previous_sha", "")),
-                    deployed_sha=str(item.get("sha") or item.get("deployed_sha", "")),
+                    environment=str(item.get("environment") or environment),
+                    deployed_at=deployed_dt,
+                    previous_sha=str(
+                        item.get("previous_sha") or dep_payload.get("previous_sha") or ""
+                    ),
+                    deployed_sha=str(item.get("sha") or item.get("deployed_sha") or ""),
                     repository=repo,
                     status=status,
-                    cohort=str(item.get("cohort", "100%")),
-                    summary=str(item.get("description") or item.get("summary", "")),
+                    cohort=str(item.get("cohort") or dep_payload.get("cohort") or "100%"),
+                    summary=str(item.get("description") or item.get("summary") or ""),
                 )
             )
         return ConnectorStatus.OK, releases, ""

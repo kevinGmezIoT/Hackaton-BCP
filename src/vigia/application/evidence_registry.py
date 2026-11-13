@@ -35,6 +35,7 @@ class EvidenceRegistry:
         window: str | None = None,
         observation_type: str = "general",
         cohort: str | None = None,
+        error_definition: str | None = None,
         comparison_result: str | None = None,
         revision_number: int | None = None,
     ) -> Evidence:
@@ -58,6 +59,7 @@ class EvidenceRegistry:
             window=window,
             observation_type=observation_type,
             cohort=cohort,
+            error_definition=error_definition,
             comparison_result=comparison_result,
             revision_number=rev_num,
         )

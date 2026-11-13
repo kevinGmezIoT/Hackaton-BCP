@@ -226,6 +226,8 @@ class CsvTelemetryAdapter:
         points: list[MetricPoint] = []
         total_requests = 0
         total_errors = 0
+        saw_requests = False
+        saw_errors = False
         with self._metrics_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
@@ -245,10 +247,14 @@ class CsvTelemetryAdapter:
                 if window_start <= ts <= cutoff_at:
                     req_raw = row.get("requests")
                     err_raw = row.get("errors")
-                    req_count = int(req_raw) if req_raw is not None and req_raw != "" else 100
-                    err_count = int(err_raw) if err_raw is not None and err_raw != "" else 0
-                    total_requests += req_count
-                    total_errors += err_count
+                    req_count = int(req_raw) if req_raw is not None and req_raw != "" else None
+                    err_count = int(err_raw) if err_raw is not None and err_raw != "" else None
+                    if req_count is not None:
+                        total_requests += req_count
+                        saw_requests = True
+                    if err_count is not None:
+                        total_errors += err_count
+                        saw_errors = True
                     points.append(
                         MetricPoint(
                             timestamp=ts,
@@ -279,7 +285,9 @@ class CsvTelemetryAdapter:
         current_val = points[-1].value
         ref_target = cutoff_at - timedelta(minutes=15)
         closest_15m = min(points, key=lambda p: abs((p.timestamp - ref_target).total_seconds()))
-        coverage = 1.0 if total_requests > 0 else 0.0
+        req_vol: int | None = total_requests if saw_requests else None
+        err_vol: int | None = total_errors if saw_errors else None
+        coverage = 1.0 if (req_vol is not None and req_vol > 0) else 0.0
         return MetricSeries(
             status=ConnectorStatus.OK,
             service=canonical,
@@ -293,8 +301,8 @@ class CsvTelemetryAdapter:
             points=points,
             current_value=current_val,
             value_15m_ago=closest_15m.value,
-            request_volume=total_requests,
-            error_total=total_errors,
+            request_volume=req_vol,
+            error_total=err_vol,
             duration_ms=duration_ms,
         )
 

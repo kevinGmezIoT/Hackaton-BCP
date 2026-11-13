@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +164,8 @@ class SqliteCaseStoreAdapter:
                     work_type TEXT NOT NULL,
                     status TEXT NOT NULL,
                     last_step_index INTEGER NOT NULL DEFAULT 0,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
                     payload_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -212,6 +214,10 @@ class SqliteCaseStoreAdapter:
                 self._conn.execute(
                     "ALTER TABLE work_queue ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "lease_owner" not in cols:
+                self._conn.execute("ALTER TABLE work_queue ADD COLUMN lease_owner TEXT")
+            if "lease_expires_at" not in cols:
+                self._conn.execute("ALTER TABLE work_queue ADD COLUMN lease_expires_at TEXT")
 
     def _next_counter(self, name: str) -> int:
         self._conn.execute("UPDATE counters SET val = val + 1 WHERE name = ?", (name,))
@@ -656,8 +662,18 @@ class SqliteCaseStoreAdapter:
             ).fetchall()
             return [CaseEvent.model_validate_json(str(r["event_json"])) for r in rows]
 
-    def claim_next_work(self, case_id: str | None = None) -> PendingWorkItem | None:
-        """Claim a pending or interrupted work item for execution."""
+    def claim_next_work(
+        self,
+        case_id: str | None = None,
+        *,
+        worker_id: str = "default-worker",
+        lease_seconds: int = 120,
+        now: datetime | None = None,
+    ) -> PendingWorkItem | None:
+        """Claim a pending or expired-lease work item atomically with a worker lease."""
+        ref_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        now_iso = ref_now.isoformat()
+        lease_expires = (ref_now + timedelta(seconds=lease_seconds)).isoformat()
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -665,26 +681,46 @@ class SqliteCaseStoreAdapter:
                     row = self._conn.execute(
                         """
                         SELECT * FROM work_queue
-                        WHERE case_id = ? AND status IN ('pending', 'in_progress')
+                        WHERE case_id = ?
+                          AND (
+                            status = 'pending'
+                            OR (
+                              status = 'in_progress'
+                              AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+                            )
+                          )
                         ORDER BY created_at ASC LIMIT 1
                         """,
-                        (case_id,),
+                        (case_id, now_iso),
                     ).fetchone()
                 else:
                     row = self._conn.execute(
                         """
                         SELECT * FROM work_queue
-                        WHERE status IN ('pending', 'in_progress')
+                        WHERE (
+                            status = 'pending'
+                            OR (
+                              status = 'in_progress'
+                              AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+                            )
+                        )
                         ORDER BY created_at ASC LIMIT 1
-                        """
+                        """,
+                        (now_iso,),
                     ).fetchone()
                 if row is None:
                     self._conn.execute("COMMIT")
                     return None
-                now_iso = datetime.now(timezone.utc).isoformat()
                 self._conn.execute(
-                    "UPDATE work_queue SET status = 'in_progress', updated_at = ? WHERE work_id = ?",
-                    (now_iso, str(row["work_id"])),
+                    """
+                    UPDATE work_queue
+                    SET status = 'in_progress',
+                        lease_owner = ?,
+                        lease_expires_at = ?,
+                        updated_at = ?
+                    WHERE work_id = ?
+                    """,
+                    (worker_id, lease_expires, now_iso, str(row["work_id"])),
                 )
                 self._conn.execute("COMMIT")
                 payload_raw = row["payload_json"] if "payload_json" in row.keys() else "{}"
@@ -695,6 +731,8 @@ class SqliteCaseStoreAdapter:
                     work_type=str(row["work_type"]),
                     status="in_progress",
                     last_step_index=int(row["last_step_index"]),
+                    lease_owner=worker_id,
+                    lease_expires_at=datetime.fromisoformat(lease_expires),
                     payload=json.loads(str(payload_raw or "{}")),
                     created_at=datetime.fromisoformat(str(row["created_at"])),
                     updated_at=datetime.fromisoformat(now_iso),
@@ -709,17 +747,28 @@ class SqliteCaseStoreAdapter:
         *,
         last_step_index: int = 0,
         status: str = "completed",
+        worker_id: str | None = None,
     ) -> None:
         with self._lock:
             now_iso = datetime.now(timezone.utc).isoformat()
-            self._conn.execute(
-                """
-                UPDATE work_queue
-                SET status = ?, last_step_index = ?, updated_at = ?
-                WHERE work_id = ?
-                """,
-                (status, last_step_index, now_iso, work_id),
-            )
+            if worker_id is not None:
+                self._conn.execute(
+                    """
+                    UPDATE work_queue
+                    SET status = ?, last_step_index = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+                    WHERE work_id = ? AND (lease_owner IS NULL OR lease_owner = ?)
+                    """,
+                    (status, last_step_index, now_iso, work_id, worker_id),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE work_queue
+                    SET status = ?, last_step_index = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+                    WHERE work_id = ?
+                    """,
+                    (status, last_step_index, now_iso, work_id),
+                )
 
     def _upsert_proposal_history_in_tx(
         self,

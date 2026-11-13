@@ -194,7 +194,8 @@ def test_delivery_a_prometheus_loki_github_and_knowledge_cutoff(
     def fake_http_get(
         url: str, params: dict[str, str], headers: dict[str, str]
     ) -> tuple[int, dict[str, Any]]:
-        if "query_range" in url and "prometheus" in url:
+        prom_q = params.get("query", "")
+        if "query_range" in url and "prometheus" in url and "latency_p95_ms" in prom_q:
             calls["prom"] += 1
             if calls["prom"] == 1:
                 return 503, {"error": "transient timeout"}
@@ -205,7 +206,7 @@ def test_delivery_a_prometheus_loki_github_and_knowledge_cutoff(
                         {
                             "metric": {"cohort": "v1"},
                             "values": [
-                                ["2026-11-12T08:45:00-05:00", "180"],
+                                [int(datetime.fromisoformat("2026-11-12T08:45:00-05:00").timestamp()), "180"],
                                 ["2026-11-12T08:50:00-05:00", "182"],
                                 ["2026-11-12T08:55:00-05:00", "181"],
                                 ["2026-11-12T09:05:00-05:00", "390"],
@@ -216,16 +217,23 @@ def test_delivery_a_prometheus_loki_github_and_knowledge_cutoff(
                     ]
                 }
             }
+        if "query_range" in url and "prometheus" in url and "http_requests_total" in prom_q:
+            return 200, {"data": {"result": [{"metric": {}, "values": [["2026-11-12T09:12:00-05:00", "420"]]}]}}
+        if "query_range" in url and "prometheus" in url and "http_request_errors_total" in prom_q:
+            return 200, {"data": {"result": [{"metric": {}, "values": [["2026-11-12T09:12:00-05:00", "3"]]}]}}
         if "loki" in url:
+            loki_ns = str(
+                int(datetime.fromisoformat("2026-11-12T09:05:00-05:00").timestamp()) * 1_000_000_000
+            )
             return 200, {
                 "data": {
                     "result": [
                         {
-                            "stream": {"cohort": "CHG-4821"},
+                            "stream": {"cohort": "CHG-4821", "level": "ERROR"},
                             "requests": 1000,
                             "values": [
                                 [
-                                    "2026-11-12T09:05:00-05:00",
+                                    loki_ns,
                                     "Connection pool exhausted Bearer secret-tok-123",
                                     25,
                                 ]
@@ -239,27 +247,45 @@ def test_delivery_a_prometheus_loki_github_and_knowledge_cutoff(
                     ]
                 }
             }
-        if "/deployments" in url:
-            return 200, {
-                "deployments": [
-                    {
+        if url.endswith("/deployments"):
+            return 200, [
+                {
+                    "id": 4821,
+                    "environment": "production",
+                    "created_at": "2026-11-12T13:55:00Z",
+                    "sha": transfers_workspace.deployed_sha,
+                    "payload": {
                         "release_id": "CHG-4821",
-                        "environment": "production",
-                        "deployed_at": "2026-11-12T08:55:00-05:00",
                         "previous_sha": transfers_workspace.base_sha,
-                        "sha": transfers_workspace.deployed_sha,
-                        "status": "active",
                     },
-                    {
+                    "statuses_url": "https://api.github.com/repos/bank/pagos-core/deployments/4821/statuses",
+                },
+                {
+                    "id": 9999,
+                    "environment": "production",
+                    "created_at": "2026-11-12T14:20:00Z",
+                    "sha": transfers_workspace.undeployed_sha,
+                    "payload": {
                         "release_id": "CHG-9999",
-                        "environment": "production",
-                        "deployed_at": "2026-11-12T09:20:00-05:00",
                         "previous_sha": transfers_workspace.deployed_sha,
-                        "sha": transfers_workspace.undeployed_sha,
-                        "status": "active",
                     },
-                ]
-            }
+                    "statuses_url": "https://api.github.com/repos/bank/pagos-core/deployments/9999/statuses",
+                },
+                {
+                    "id": 4800,
+                    "environment": "production",
+                    "created_at": "2026-11-12T13:00:00Z",
+                    "sha": transfers_workspace.base_sha,
+                    "payload": {"release_id": "CHG-4800"},
+                    "statuses_url": "https://api.github.com/repos/bank/pagos-core/deployments/4800/statuses",
+                },
+            ]
+        if url.endswith("/deployments/4821/statuses"):
+            return 200, [{"state": "success", "created_at": "2026-11-12T13:56:00Z"}]
+        if url.endswith("/deployments/9999/statuses"):
+            return 200, [{"state": "success", "created_at": "2026-11-12T14:21:00Z"}]
+        if url.endswith("/deployments/4800/statuses"):
+            return 200, [{"state": "inactive", "created_at": "2026-11-12T13:56:00Z"}]
         if "/compare/" in url:
             return 200, {
                 "files": [{"filename": "src/pool.py", "patch": "@@ -1 +1 @@\n-80\n+50"}]
@@ -378,8 +404,8 @@ def test_delivery_b_concurrent_duplicate_webhooks_episode_merge_and_worker_resta
     assert len(case_ids) == 1
     case_id = next(iter(case_ids))
 
-    # Simulate partial progress before worker crash (claim work -> leave in_progress).
-    work = service._store.claim_next_work(case_id=case_id)
+    # Simulate partial progress before worker crash (expired worker lease -> leave in_progress).
+    work = service._store.claim_next_work(case_id=case_id, worker_id="crashed-worker", lease_seconds=0)
     assert work is not None
 
     # Restart: new service instance connected to the same SQLite database resumes work cleanly.
@@ -527,15 +553,31 @@ def test_delivery_c_shadow_mode_blocks_writes_and_serves_console_sse_and_review_
     assert sim_state.rolled_back_releases == set()
 
     app = VigiaHttpApp(service, require_user_auth=True)
+    approver_hdr = {
+        "Authorization": f"Bearer {app.issue_session_token('lead', ['oncall-approvers'])}"
+    }
+    reviewer_hdr = {
+        "Authorization": f"Bearer {app.issue_session_token('lead-transfers', ['transfers-squad'])}"
+    }
+
+    # Unauthenticated / spoofed raw headers must fail with 401 when require_user_auth=True.
+    spoof_resp = app.handle_request(
+        "GET",
+        f"/api/eventos?caso={case.case_id}",
+        headers={"X-Vigia-User": "attacker", "X-Vigia-Groups": "admin"},
+    )
+    assert spoof_resp.status_code == 401
+
     # Approval is blocked with 403 in shadow mode.
     forbidden_approve = app.handle_request(
         "POST",
         "/api/aprobacion",
-        headers={"X-Vigia-User": "lead", "X-Vigia-Groups": "oncall-approvers"},
+        headers=approver_hdr,
         body=json.dumps(
             {
                 "case_id": case.case_id,
                 "proposal_id": case.proposal.proposal_id,
+                "proposal_version": case.proposal.version,
                 "decision": "approve",
             }
         ),
@@ -546,7 +588,7 @@ def test_delivery_c_shadow_mode_blocks_writes_and_serves_console_sse_and_review_
     sse_full = app.handle_request(
         "GET",
         f"/api/eventos?caso={case.case_id}",
-        headers={"X-Vigia-User": "lead", "X-Vigia-Groups": "transfers-squad"},
+        headers=reviewer_hdr,
     )
     assert sse_full.status_code == 200
     assert "text/event-stream" in sse_full.headers["Content-Type"]
@@ -562,7 +604,7 @@ def test_delivery_c_shadow_mode_blocks_writes_and_serves_console_sse_and_review_
     rev_resp = app.handle_request(
         "POST",
         "/api/revision",
-        headers={"X-Vigia-User": "lead-transfers", "X-Vigia-Groups": "transfers-squad"},
+        headers=reviewer_hdr,
         body=json.dumps(
             {
                 "case_id": case.case_id,
@@ -584,8 +626,7 @@ def test_delivery_c_shadow_mode_blocks_writes_and_serves_console_sse_and_review_
         "GET",
         f"/api/eventos?caso={case.case_id}",
         headers={
-            "X-Vigia-User": "lead",
-            "X-Vigia-Groups": "transfers-squad",
+            **reviewer_hdr,
             "Last-Event-ID": str(last_id),
         },
     )
@@ -630,16 +671,19 @@ def test_delivery_d_assisted_permissions_concurrency_timeout_and_sustained_verif
     )
     assert case.proposal is not None
     app = VigiaHttpApp(service, require_user_auth=True)
+    bob_hdr = {"Authorization": f"Bearer {app.issue_session_token('bob', ['billing-squad'])}"}
+    lead_hdr = {"Authorization": f"Bearer {app.issue_session_token('lead', ['oncall-approvers'])}"}
 
     # Wrong team -> 403.
     unauth_resp = app.handle_request(
         "POST",
         "/api/aprobacion",
-        headers={"X-Vigia-User": "bob", "X-Vigia-Groups": "billing-squad"},
+        headers=bob_hdr,
         body=json.dumps(
             {
                 "case_id": case.case_id,
                 "proposal_id": case.proposal.proposal_id,
+                "proposal_version": case.proposal.version,
                 "decision": "approve",
             }
         ),
@@ -650,7 +694,7 @@ def test_delivery_d_assisted_permissions_concurrency_timeout_and_sustained_verif
     stale_resp = app.handle_request(
         "POST",
         "/api/aprobacion",
-        headers={"X-Vigia-User": "lead", "X-Vigia-Groups": "oncall-approvers"},
+        headers=lead_hdr,
         body=json.dumps(
             {
                 "case_id": case.case_id,
@@ -667,11 +711,12 @@ def test_delivery_d_assisted_permissions_concurrency_timeout_and_sustained_verif
     timed_out = app.handle_request(
         "POST",
         "/api/aprobacion",
-        headers={"X-Vigia-User": "lead", "X-Vigia-Groups": "oncall-approvers"},
+        headers=lead_hdr,
         body=json.dumps(
             {
                 "case_id": case.case_id,
                 "proposal_id": case.proposal.proposal_id,
+                "proposal_version": case.proposal.version,
                 "decision": "approve",
                 "idempotency_key": "idem-approve-1",
             }
@@ -686,11 +731,12 @@ def test_delivery_d_assisted_permissions_concurrency_timeout_and_sustained_verif
     conflict = app.handle_request(
         "POST",
         "/api/aprobacion",
-        headers={"X-Vigia-User": "lead", "X-Vigia-Groups": "oncall-approvers"},
+        headers=lead_hdr,
         body=json.dumps(
             {
                 "case_id": case.case_id,
                 "proposal_id": case.proposal.proposal_id,
+                "proposal_version": case.proposal.version,
                 "decision": "reject",
                 "idempotency_key": "idem-approve-1",
             }
@@ -714,7 +760,7 @@ def test_delivery_d_assisted_permissions_concurrency_timeout_and_sustained_verif
     )
     metrics_path.write_text(
         base_metrics
-        + "\n2026-11-12T09:16:00-05:00,transferencias,production,latency_p95_ms,410.0,v1,post_rollback\n",
+        + "\n2026-11-12T09:16:00-05:00,transferencias,production,latency_p95_ms,410.0,v1,post_rollback,120,0\n",
         encoding="utf-8",
     )
 
@@ -730,9 +776,9 @@ def test_delivery_d_assisted_permissions_concurrency_timeout_and_sustained_verif
     # Sustained recovery near 184 ms closes the case cleanly.
     metrics_path.write_text(
         base_metrics
-        + "\n2026-11-12T09:16:00-05:00,transferencias,production,latency_p95_ms,410.0,v1,post_rollback"
-        + "\n2026-11-12T09:18:00-05:00,transferencias,production,latency_p95_ms,190.0,v1,post_rollback"
-        + "\n2026-11-12T09:19:00-05:00,transferencias,production,latency_p95_ms,184.0,v1,post_rollback\n",
+        + "\n2026-11-12T09:16:00-05:00,transferencias,production,latency_p95_ms,410.0,v1,post_rollback,120,0"
+        + "\n2026-11-12T09:18:00-05:00,transferencias,production,latency_p95_ms,190.0,v1,post_rollback,120,0"
+        + "\n2026-11-12T09:19:00-05:00,transferencias,production,latency_p95_ms,184.0,v1,post_rollback,120,0\n",
         encoding="utf-8",
     )
     closed = service.verify_case_recovery(

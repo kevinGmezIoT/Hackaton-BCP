@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from vigia.adapters.outbound.case_store import StaleRevisionError
 from vigia.application.approval_service import ensure_proposal_history
-from vigia.application.cohort_comparison import find_reusable_comparison
+from vigia.application.cohort_comparison import (
+    compute_comparison_windows,
+    find_reusable_comparison,
+    infer_error_definition,
+)
 from vigia.application.investigator import InvestigatorAgent
 from vigia.application.tools import CaseDependencies
 from vigia.domain.contracts import (
@@ -333,10 +337,34 @@ class ConversationService:
                 if case.proposal is not None
                 else case.alert.service
             )
+            active_res = self._deps.releases.resolve_active_releases(
+                target_svc, case.alert.environment, target_cutoff
+            )
+            active_rel = active_res.releases[0] if active_res.releases else None
+            rel_id = (
+                active_rel.release_id
+                if active_rel is not None
+                else (case.proposal.target_release_id if case.proposal is not None else None)
+            )
+            deployed_at = (
+                active_rel.deployed_at
+                if active_rel is not None
+                else (target_cutoff - timedelta(minutes=15))
+            )
+            pre_s, _, _, post_e, _ = compute_comparison_windows(
+                deployed_at=deployed_at, cutoff_at=target_cutoff
+            )
+            expected_window = f"{pre_s.isoformat()}..{post_e.isoformat()}"
+            expected_cohorts = {rel_id} if rel_id else set()
+            requested_error_def = infer_error_definition(text)
             reusable = find_reusable_comparison(
                 case,
                 service=target_svc,
                 cutoff_at=target_cutoff,
+                release_id=rel_id,
+                window=expected_window,
+                cohorts=expected_cohorts,
+                error_definition=requested_error_def,
             )
             if reusable is not None:
                 if effective_rev != current_rev:

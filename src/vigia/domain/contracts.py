@@ -442,8 +442,8 @@ class MetricSeries(BaseModel):
     points: list[MetricPoint] = Field(default_factory=list)
     current_value: float | None = None
     value_15m_ago: float | None = None
-    request_volume: int = 0
-    error_total: int = 0
+    request_volume: int | None = None
+    error_total: int | None = None
     duration_ms: float = 0.0
     note: str = ""
 
@@ -468,7 +468,7 @@ class AnomalyReport(BaseModel):
     slope_per_minute: float = 0.0
     projected_minutes_to_threshold: float | None = None
     projection_status: str = "projected"
-    request_volume: int = 0
+    request_volume: int | None = None
     coverage: float = 1.0
     note: str = ""
 
@@ -543,6 +543,7 @@ class Evidence(BaseModel):
     window: str | None = None
     observation_type: str = "general"
     cohort: str | None = None
+    error_definition: str | None = None
     comparison_result: str | None = None
     revision_number: int = 1
 
@@ -662,7 +663,7 @@ class VerificationResult(BaseModel):
     detail: str
     consecutive_healthy_points: int = 0
     dependency_errors_after: int | None = None
-    request_volume: int = 0
+    request_volume: int | None = None
     coverage: float = 1.0
 
 
@@ -734,6 +735,7 @@ class CohortComparisonResult(BaseModel):
     windows: list[CohortRateWindow] = Field(default_factory=list)
     pre_total_requests: int = 0
     post_total_requests: int = 0
+    error_definition: str = "*"
     shared_resource_saturated: bool = False
     verdict: ComparisonVerdict = ComparisonVerdict.INDETERMINATE
     missing_data: list[str] = Field(default_factory=list)
@@ -836,6 +838,8 @@ class PendingWorkItem(BaseModel):
     work_type: str = "investigate"
     status: str = "pending"
     last_step_index: int = 0
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime

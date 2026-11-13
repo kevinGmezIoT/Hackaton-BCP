@@ -208,7 +208,14 @@ class CaseStorePort(Protocol):
 
     def list_events(self, case_id: str, after_sequence_id: int = 0) -> list[CaseEvent]: ...
 
-    def claim_next_work(self, case_id: str | None = None) -> PendingWorkItem | None: ...
+    def claim_next_work(
+        self,
+        case_id: str | None = None,
+        *,
+        worker_id: str = "default-worker",
+        lease_seconds: int = 120,
+        now: datetime | None = None,
+    ) -> PendingWorkItem | None: ...
 
     def complete_work(
         self,
@@ -216,6 +223,7 @@ class CaseStorePort(Protocol):
         *,
         last_step_index: int = 0,
         status: str = "completed",
+        worker_id: str | None = None,
     ) -> None: ...
 
     def create_chat_turn_transactional(

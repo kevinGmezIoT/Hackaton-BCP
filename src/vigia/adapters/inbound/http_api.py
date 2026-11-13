@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import secrets
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -56,7 +61,7 @@ class ApprovalRequest(BaseModel):
     decision: DecisionChoice
     comment: str = ""
     idempotency_key: str | None = None
-    proposal_version: int | None = None
+    proposal_version: int = Field(ge=1)
 
 
 class ChatMessageRequest(BaseModel):
@@ -255,69 +260,165 @@ def _render_console_html(mode: OperationalMode) -> str:
     let currentCase = null;
     const seenEventSeq = new Set();
     let msgCounter = 1;
+
+    function el(tag, text, cls) {{
+      const node = document.createElement(tag);
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      if (cls) node.className = cls;
+      return node;
+    }}
+
+    function lineWithLabel(label, value) {{
+      const p = document.createElement("p");
+      const b = el("b", label);
+      p.appendChild(b);
+      p.appendChild(document.createTextNode(" " + String(value ?? "")));
+      return p;
+    }}
+
+    function renderSummary(data) {{
+      const box = document.getElementById("summary");
+      const frag = document.createDocumentFragment();
+      frag.appendChild(el("h2", `${{data.case_id}} (${{data.status}} · modo ${{data.mode}})`));
+      frag.appendChild(
+        lineWithLabel(
+          `Síntoma (${{data.symptom.service}}):`,
+          `${{data.symptom.metric}} = ${{data.symptom.current_value}} ${{data.symptom.unit}} (umbral ${{data.symptom.threshold_value}})`
+        )
+      );
+      const hyp = data.probable_cause && data.probable_cause.finding
+        ? data.probable_cause.finding.hypothesis
+        : "En investigación";
+      frag.appendChild(
+        lineWithLabel(
+          `Causa probable (${{(data.probable_cause && data.probable_cause.target_service) || "pendiente"}}):`,
+          hyp
+        )
+      );
+      const counts = document.createElement("p");
+      counts.appendChild(el("b", "Evidencias:"));
+      counts.appendChild(document.createTextNode(` ${{data.evidence.length}} | `));
+      counts.appendChild(el("b", "Lagunas:"));
+      counts.appendChild(document.createTextNode(` ${{data.connector_gaps.length}}`));
+      frag.appendChild(counts);
+      box.replaceChildren(frag);
+    }}
+
+    function renderRevisions(data) {{
+      const revDiv = document.getElementById("revisions");
+      const frag = document.createDocumentFragment();
+      if (data.previous_conclusion && data.current_conclusion) {{
+        frag.appendChild(el("h3", "Comparación de revisiones"));
+        frag.appendChild(
+          lineWithLabel(
+            `Revisión inicial (#${{data.previous_conclusion.revision_number}}):`,
+            `${{data.previous_conclusion.action_outcome || "initial"}} · ${{data.previous_conclusion.summary || ""}}`
+          )
+        );
+        frag.appendChild(
+          lineWithLabel(
+            `Revisión vigente (#${{data.current_conclusion.revision_number}}):`,
+            `${{data.current_conclusion.action_outcome || ""}} · ${{data.current_conclusion.summary || ""}}`
+          )
+        );
+      }} else if (data.active_revision) {{
+        frag.appendChild(
+          lineWithLabel(
+            "Revisión diagnóstica vigente:",
+            `#${{data.active_revision.revision_number}} (corte ${{data.active_revision.cutoff_at}})`
+          )
+        );
+      }}
+      revDiv.replaceChildren(frag);
+    }}
+
+    function renderActions(data) {{
+      const actions = document.getElementById("actions");
+      const frag = document.createDocumentFragment();
+      if (data.proposal && data.mode === "shadow") {{
+        const btn = el("button", "Evaluar recomendación (revisión sombra)");
+        btn.addEventListener("click", () => submitReview(data.case_id, data.proposal.proposal_id));
+        frag.appendChild(btn);
+      }} else if (data.proposal && data.mode === "assisted" && data.proposal.status === "pending") {{
+        const prop = data.proposal;
+        const approveBtn = el("button", `Aprobar v${{prop.version}}`);
+        approveBtn.addEventListener("click", () => decide(data.case_id, prop.proposal_id, prop.version, "approve"));
+        const rejectBtn = el("button", "Rechazar", "danger");
+        rejectBtn.addEventListener("click", () => decide(data.case_id, prop.proposal_id, prop.version, "reject"));
+        frag.appendChild(approveBtn);
+        frag.appendChild(document.createTextNode(" "));
+        frag.appendChild(rejectBtn);
+      }} else if (data.proposal && data.proposal.status === "under_review") {{
+        frag.appendChild(el("i", "Propuesta en reevaluación conversacional; aprobación bloqueada hasta finalizar."));
+      }} else {{
+        frag.appendChild(el("i", `Sin acciones aprobables pendientes. ${{data.suggested_next_check || ""}}`));
+      }}
+      actions.replaceChildren(frag);
+    }}
+
+    function renderSources(data) {{
+      const container = document.getElementById("sources");
+      const frag = document.createDocumentFragment();
+      for (const ev of data.evidence || []) {{
+        const det = document.createElement("details");
+        det.appendChild(el("summary", `[${{ev.evidence_id}}] (${{ev.source}}) ${{ev.observed_fact}}`));
+        det.appendChild(el("pre", ev.reproducible_reference));
+        frag.appendChild(det);
+      }}
+      container.replaceChildren(frag);
+    }}
+
     async function loadCase() {{
       const id = document.getElementById("caseId").value.trim();
-      const hdrs = {{"X-Vigia-User": "oncall-lead", "X-Vigia-Groups": "transfers-squad,core-payments-squad,oncall-approvers"}};
-      const res = await fetch(`/api/caso?caso=${{encodeURIComponent(id)}}`, {{ headers: hdrs }});
+      const res = await fetch(`/api/caso?caso=${{encodeURIComponent(id)}}`, {{ credentials: "same-origin" }});
       const data = await res.json();
       if (!res.ok) {{
         document.getElementById("summary").textContent = JSON.stringify(data);
         return;
       }}
       currentCase = data;
-      document.getElementById("summary").innerHTML =
-        `<h2>${{data.case_id}} (${{data.status}} · modo ${{data.mode}})</h2>` +
-        `<p><b>Síntoma (${{data.symptom.service}}):</b> ${{data.symptom.metric}} = ${{data.symptom.current_value}} ${{data.symptom.unit}} (umbral ${{data.symptom.threshold_value}})</p>` +
-        `<p><b>Causa probable (${{data.probable_cause.target_service || 'pendiente'}}):</b> ${{data.probable_cause.finding ? data.probable_cause.finding.hypothesis : 'En investigación'}}</p>` +
-        `<p><b>Evidencias:</b> ${{data.evidence.length}} | <b>Lagunas:</b> ${{data.connector_gaps.length}}</p>`;
-      const revDiv = document.getElementById("revisions");
-      if (data.previous_conclusion && data.current_conclusion) {{
-        revDiv.innerHTML = `<h3>Comparación de revisiones</h3>` +
-          `<p><b>Revisión inicial (#${{data.previous_conclusion.revision_number}}):</b> ${{data.previous_conclusion.action_outcome || 'initial'}} · ${{data.previous_conclusion.summary || ''}}</p>` +
-          `<p><b>Revisión vigente (#${{data.current_conclusion.revision_number}}):</b> ${{data.current_conclusion.action_outcome || ''}} · ${{data.current_conclusion.summary || ''}}</p>`;
-      }} else if (data.active_revision) {{
-        revDiv.innerHTML = `<p><b>Revisión diagnóstica vigente:</b> #${{data.active_revision.revision_number}} (corte ${{data.active_revision.cutoff_at}})</p>`;
-      }}
-      const actions = document.getElementById("actions");
-      if (data.proposal && data.mode === "shadow") {{
-        actions.innerHTML = `<button onclick="submitReview('${{data.case_id}}','${{data.proposal.proposal_id}}')">Evaluar recomendación (revisión sombra)</button>`;
-      }} else if (data.proposal && data.mode === "assisted" && data.proposal.status === "pending") {{
-        actions.innerHTML = `<button onclick="decide('${{data.case_id}}','${{data.proposal.proposal_id}}',${{data.proposal.version}},'approve')">Aprobar v${{data.proposal.version}}</button> ` +
-          `<button class="danger" onclick="decide('${{data.case_id}}','${{data.proposal.proposal_id}}',${{data.proposal.version}},'reject')">Rechazar</button>`;
-      }} else if (data.proposal && data.proposal.status === "under_review") {{
-        actions.innerHTML = `<i>Propuesta en reevaluación conversacional; aprobación bloqueada hasta finalizar.</i>`;
-      }} else {{
-        actions.innerHTML = `<i>Sin acciones aprobables pendientes. ${{data.suggested_next_check || ''}}</i>`;
-      }}
-      document.getElementById("sources").innerHTML = data.evidence.map(ev =>
-        `<details><summary>[${{ev.evidence_id}}] (${{ev.source}}) ${{ev.observed_fact}}</summary><pre>${{ev.reproducible_reference}}</pre></details>`
-      ).join("");
-      await loadMessages(id, hdrs);
+      renderSummary(data);
+      renderRevisions(data);
+      renderActions(data);
+      renderSources(data);
+      await loadMessages(id);
       if (evtSource) evtSource.close();
       seenEventSeq.clear();
-      document.getElementById("events").innerHTML = "";
-      evtSource = new EventSource(`/api/eventos?caso=${{encodeURIComponent(id)}}`);
+      document.getElementById("events").replaceChildren();
+      evtSource = new EventSource(`/api/eventos?caso=${{encodeURIComponent(id)}}`, {{ withCredentials: true }});
       evtSource.onmessage = (e) => {{
         if (e.lastEventId && seenEventSeq.has(e.lastEventId)) return;
         if (e.lastEventId) seenEventSeq.add(e.lastEventId);
-        const li = document.createElement("li");
-        li.textContent = e.data;
-        document.getElementById("events").appendChild(li);
+        document.getElementById("events").appendChild(el("li", e.data));
       }};
     }}
-    async function loadMessages(id, hdrs) {{
-      const res = await fetch(`/api/casos/${{encodeURIComponent(id)}}/mensajes`, {{ headers: hdrs }});
+
+    async function loadMessages(id) {{
+      const res = await fetch(`/api/casos/${{encodeURIComponent(id)}}/mensajes`, {{ credentials: "same-origin" }});
       if (!res.ok) return;
       const data = await res.json();
       const box = document.getElementById("chatHistory");
-      box.innerHTML = (data.turns || []).map(t =>
-        `<div style="margin-bottom:8px;border-left:3px solid #0f6a88;padding-left:8px;">` +
-        `<div><b>${{t.actor}}</b> (rev ${{t.base_revision}} · ${{t.status}}): ${{t.question}}</div>` +
-        `<div>${{t.answer || 'Investigando...'}}</div>` +
-        (t.referenced_evidence_ids && t.referenced_evidence_ids.length ? `<small>Citas: ${{t.referenced_evidence_ids.join(', ')}}</small>` : '') +
-        `</div>`
-      ).join("");
+      const frag = document.createDocumentFragment();
+      for (const t of data.turns || []) {{
+        const row = document.createElement("div");
+        row.style.marginBottom = "8px";
+        row.style.borderLeft = "3px solid #0f6a88";
+        row.style.paddingLeft = "8px";
+
+        const header = document.createElement("div");
+        header.appendChild(el("b", t.actor));
+        header.appendChild(document.createTextNode(` (rev ${{t.base_revision}} · ${{t.status}}): ${{t.question}}`));
+        row.appendChild(header);
+
+        row.appendChild(el("div", t.answer || "Investigando..."));
+        if (t.referenced_evidence_ids && t.referenced_evidence_ids.length) {{
+          row.appendChild(el("small", `Citas: ${{t.referenced_evidence_ids.join(", ")}}`));
+        }}
+        frag.appendChild(row);
+      }}
+      box.replaceChildren(frag);
     }}
+
     async function sendChat() {{
       if (!currentCase) return;
       const text = document.getElementById("chatInput").value.trim();
@@ -331,25 +432,30 @@ def _render_console_html(mode: OperationalMode) -> str:
       }};
       await fetch(`/api/casos/${{encodeURIComponent(currentCase.case_id)}}/mensajes`, {{
         method: "POST",
-        headers: {{"Content-Type": "application/json", "X-Vigia-User": "oncall-lead", "X-Vigia-Groups": "transfers-squad,core-payments-squad"}},
+        credentials: "same-origin",
+        headers: {{"Content-Type": "application/json"}},
         body: JSON.stringify(body)
       }});
       document.getElementById("chatInput").value = "";
       document.getElementById("chatStatus").textContent = "";
       await loadCase();
     }}
+
     async function submitReview(caseId, propId) {{
       await fetch("/api/revision", {{
         method: "POST",
-        headers: {{"Content-Type": "application/json", "X-Vigia-User": "oncall-lead", "X-Vigia-Groups": "transfers-squad"}},
+        credentials: "same-origin",
+        headers: {{"Content-Type": "application/json"}},
         body: JSON.stringify({{case_id: caseId, proposal_id: propId, verdict: "useful", comment: "Validado en consola"}})
       }});
       loadCase();
     }}
+
     async function decide(caseId, propId, propVersion, decision) {{
       await fetch("/api/aprobacion", {{
         method: "POST",
-        headers: {{"Content-Type": "application/json", "X-Vigia-User": "oncall-lead", "X-Vigia-Groups": "oncall-approvers"}},
+        credentials: "same-origin",
+        headers: {{"Content-Type": "application/json"}},
         body: JSON.stringify({{case_id: caseId, proposal_id: propId, proposal_version: propVersion, decision}})
       }});
       loadCase();
@@ -369,11 +475,69 @@ class VigiaHttpApp:
         webhook_token: str | None = None,
         require_user_auth: bool = False,
         auto_process_alerts: bool = False,
+        session_secret: str | None = None,
+        trusted_proxy_token: str | None = None,
+        allow_demo_console_session: bool = False,
     ) -> None:
         self._service = service
         self._webhook_token = webhook_token
         self._require_user_auth = require_user_auth
         self._auto_process_alerts = auto_process_alerts
+        self._session_secret = (session_secret or secrets.token_urlsafe(32)).encode("utf-8")
+        self._trusted_proxy_token = trusted_proxy_token
+        self._allow_demo_console_session = allow_demo_console_session
+
+    def issue_session_token(
+        self,
+        user: str,
+        groups: list[str],
+        *,
+        ttl_seconds: int = 3600,
+    ) -> str:
+        """Issue an HMAC-signed short-lived corporate session token."""
+        payload = json.dumps(
+            {"u": user, "g": list(groups), "exp": int(time.time()) + ttl_seconds},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        sig = hmac.new(self._session_secret, payload_b64.encode("ascii"), hashlib.sha256).digest()
+        sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
+        return f"{payload_b64}.{sig_b64}"
+
+    def _verify_session_token(self, token: str) -> tuple[str | None, list[str]]:
+        if "." not in token:
+            return None, []
+        payload_b64, sig_b64 = token.split(".", 1)
+        expected_sig = hmac.new(
+            self._session_secret, payload_b64.encode("ascii"), hashlib.sha256
+        ).digest()
+        expected_b64 = base64.urlsafe_b64encode(expected_sig).decode("ascii").rstrip("=")
+        if not hmac.compare_digest(sig_b64, expected_b64):
+            return None, []
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        try:
+            claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None, []
+        if not isinstance(claims, dict):
+            return None, []
+        if int(claims.get("exp", 0)) < int(time.time()):
+            return None, []
+        user = str(claims.get("u") or "").strip() or None
+        raw_groups = claims.get("g") or []
+        groups = [str(g).strip() for g in raw_groups if str(g).strip()] if isinstance(raw_groups, list) else []
+        return user, groups
+
+    def _extract_cookie_token(self, hdrs: dict[str, str], name: str = "vigia_session") -> str | None:
+        raw_cookie = hdrs.get("cookie", "")
+        for part in raw_cookie.split(";"):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            if k.strip() == name:
+                return v.strip()
+        return None
 
     def _json_response(self, status_code: int, payload: Any) -> ApiResponse:
         return ApiResponse(
@@ -396,12 +560,36 @@ class VigiaHttpApp:
     def _extract_session_identity(
         self, hdrs: dict[str, str]
     ) -> tuple[str | None, list[str]]:
-        user = hdrs.get("x-vigia-user") or hdrs.get("x-authenticated-user")
-        groups_raw = hdrs.get("x-vigia-groups") or hdrs.get("x-authenticated-groups") or ""
-        groups = [g.strip() for g in groups_raw.split(",") if g.strip()]
-        if not user and not self._require_user_auth:
-            return "oncall-lead", groups or ["admin"]
-        return user, groups
+        auth_hdr = hdrs.get("authorization", "")
+        if auth_hdr.lower().startswith("bearer "):
+            user, groups = self._verify_session_token(auth_hdr[7:].strip())
+            if user is not None:
+                return user, groups
+            return None, []
+
+        cookie_tok = self._extract_cookie_token(hdrs)
+        if cookie_tok:
+            user, groups = self._verify_session_token(cookie_tok)
+            if user is not None:
+                return user, groups
+            return None, []
+
+        proxy_hdr = hdrs.get("x-vigia-proxy-auth", "")
+        if self._trusted_proxy_token and hmac.compare_digest(
+            proxy_hdr, self._trusted_proxy_token
+        ):
+            user = hdrs.get("x-vigia-user") or hdrs.get("x-authenticated-user")
+            groups_raw = hdrs.get("x-vigia-groups") or hdrs.get("x-authenticated-groups") or ""
+            groups = [g.strip() for g in groups_raw.split(",") if g.strip()]
+            return user, groups
+
+        if not self._require_user_auth:
+            user = hdrs.get("x-vigia-user") or hdrs.get("x-authenticated-user")
+            groups_raw = hdrs.get("x-vigia-groups") or hdrs.get("x-authenticated-groups") or ""
+            groups = [g.strip() for g in groups_raw.split(",") if g.strip()]
+            return (user or "oncall-lead"), (groups or ["admin"])
+
+        return None, []
 
     def _can_read_case(self, case: CaseRecord, groups: list[str]) -> bool:
         if not groups and not self._require_user_auth:
@@ -437,10 +625,19 @@ class VigiaHttpApp:
         upper_method = method.upper()
 
         if upper_method == "GET" and path == "/":
+            resp_headers = {"Content-Type": "text/html; charset=utf-8"}
+            if self._allow_demo_console_session and not self._require_user_auth:
+                tok = self.issue_session_token(
+                    "oncall-lead",
+                    ["transfers-squad", "core-payments-squad", "oncall-approvers"],
+                )
+                resp_headers["Set-Cookie"] = (
+                    f"vigia_session={tok}; HttpOnly; SameSite=Strict; Path=/"
+                )
             return ApiResponse(
                 status_code=200,
                 body=_render_console_html(self._service._default_mode),
-                headers={"Content-Type": "text/html; charset=utf-8"},
+                headers=resp_headers,
             )
 
         if upper_method == "POST" and path == "/api/alerta":
@@ -566,6 +763,7 @@ class VigiaHttpApp:
                     idempotency_key=req.idempotency_key,
                     actor_groups=groups,
                     proposal_version=req.proposal_version,
+                    require_proposal_version=True,
                 )
             except (ValidationError, ValueError) as exc:
                 return self._json_response(400, {"error": str(exc)})

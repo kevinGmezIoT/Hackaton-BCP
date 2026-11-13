@@ -712,7 +712,8 @@ class CaseToolKit:
                 observed_fact=(
                     f"{metric} current={result.current_value} {result.unit}, "
                     f"15m_ago={result.value_15m_ago} {result.unit}, points={len(result.points)}, "
-                    f"volume={result.request_volume}, coverage={result.coverage:.2f}"
+                    f"volume={result.request_volume if result.request_volume is not None else 'unknown'}, "
+                    f"coverage={result.coverage:.2f}"
                 ),
                 window=f"{result.window_start.isoformat()}..{result.window_end.isoformat()}",
                 observation_type="metrics",
@@ -955,6 +956,8 @@ class CaseToolKit:
             revision=comparison.release_id,
             window=window_str,
             observation_type="cohort_comparison",
+            cohort=",".join(sorted({w.cohort for w in comparison.windows if w.cohort})) or None,
+            error_definition=comparison.error_definition,
             comparison_result=comparison.verdict.value,
         )
         for missing in comparison.missing_data:

@@ -60,12 +60,16 @@ class CaseService:
         clock: Callable[[], datetime] | None = None,
         default_mode: OperationalMode = OperationalMode.ASSISTED,
         re_evaluate_on_update: bool = True,
+        worker_id: str | None = None,
+        lease_seconds: int = 120,
     ) -> None:
         self._deps = deps
         self._investigator = investigator
         self._clock = clock
         self._default_mode = default_mode
         self._re_evaluate_on_update = re_evaluate_on_update
+        self._worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
+        self._lease_seconds = lease_seconds
         self._store: CaseStorePort = deps.case_store or SqliteCaseStoreAdapter(":memory:")
         if self._deps.case_store is None:
             self._deps.case_store = self._store
@@ -264,15 +268,30 @@ class CaseService:
                 self._deps.audit.emit_event(ev)
         return result
 
-    def process_pending_work(self, case_id: str | None = None) -> CaseRecord | None:
-        """Claim the next pending or interrupted investigation or follow-up task and run it durably."""
-        work = self._store.claim_next_work(case_id=case_id)
+    def process_pending_work(
+        self,
+        case_id: str | None = None,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int | None = None,
+    ) -> CaseRecord | None:
+        """Claim the next pending or expired-lease investigation or follow-up task and run it durably."""
+        effective_worker = worker_id or self._worker_id
+        effective_lease = self._lease_seconds if lease_seconds is None else lease_seconds
+        work = self._store.claim_next_work(
+            case_id=case_id,
+            worker_id=effective_worker,
+            lease_seconds=effective_lease,
+            now=self._now(),
+        )
         if work is None:
             return None
 
         case = self._store.get_case(work.case_id)
         if case is None:
-            self._store.complete_work(work.work_id, status="failed")
+            self._store.complete_work(
+                work.work_id, status="failed", worker_id=effective_worker
+            )
             return None
 
         if work.work_type == "follow_up":
@@ -284,12 +303,15 @@ class CaseService:
                     now=self._now(),
                 )
             except Exception:
-                self._store.complete_work(work.work_id, status="failed")
+                self._store.complete_work(
+                    work.work_id, status="failed", worker_id=effective_worker
+                )
                 raise
             self._store.complete_work(
                 work.work_id,
                 last_step_index=len(updated.evidence),
                 status="completed",
+                worker_id=effective_worker,
             )
             return updated
 
@@ -299,6 +321,7 @@ class CaseService:
             work.work_id,
             last_step_index=len(updated.evidence),
             status="completed",
+            worker_id=effective_worker,
         )
         return updated
 
@@ -520,6 +543,7 @@ class CaseService:
         idempotency_key: str | None = None,
         actor_groups: list[str] | None = None,
         proposal_version: int | None = None,
+        require_proposal_version: bool = False,
         decided_at: datetime | None = None,
         verification_at: datetime | None = None,
     ) -> CaseRecord:
@@ -537,6 +561,7 @@ class CaseService:
                 idempotency_key=idempotency_key,
                 actor_groups=actor_groups,
                 proposal_version=proposal_version,
+                require_proposal_version=require_proposal_version,
                 now=action_time,
             )
 
@@ -769,9 +794,12 @@ class CaseService:
         dep_errors_after = dep_logs.total if dep_logs.status == ConnectorStatus.OK else 0
 
         post_value: float | None = None
-        post_volume = sum(
-            p.request_count if p.request_count is not None else 100
-            for p in post_points
+        if post_points and all(p.request_count is not None for p in post_points):
+            post_volume: int | None = sum(p.request_count for p in post_points if p.request_count is not None)
+        else:
+            post_volume = series.request_volume
+        error_total_known = (series.error_total is not None) or (
+            bool(post_points) and all(p.error_count is not None for p in post_points)
         )
         consecutive_healthy = 0
         for pt in post_points:
@@ -795,8 +823,10 @@ class CaseService:
             meets_band = post_value <= criteria.healthy_band_max_ms
             meets_consecutive = consecutive_healthy >= criteria.consecutive_healthy_windows
             meets_traffic = (
-                post_volume >= criteria.min_request_volume
+                post_volume is not None
+                and post_volume >= criteria.min_request_volume
                 and series.coverage >= criteria.min_coverage
+                and error_total_known
             )
             meets_dep_errors = dep_errors_after == 0
 
@@ -829,8 +859,10 @@ class CaseService:
                         f"consecutive healthy windows {consecutive_healthy} < {criteria.consecutive_healthy_windows}"
                     )
                 if not meets_traffic:
+                    vol_label = str(post_volume) if post_volume is not None else "unknown"
+                    err_label = str(series.error_total) if error_total_known else "unknown"
                     reasons.append(
-                        f"insufficient traffic/coverage (volume={post_volume}/{criteria.min_request_volume}, coverage={series.coverage:.2f})"
+                        f"insufficient/unknown traffic or coverage (volume={vol_label}/{criteria.min_request_volume}, errors={err_label}, coverage={series.coverage:.2f})"
                     )
                 if not meets_dep_errors:
                     reasons.append(f"dependency still reports {dep_errors_after} post-action error(s)")

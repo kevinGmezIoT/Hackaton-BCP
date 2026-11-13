@@ -427,6 +427,7 @@ class ApprovalService:
         idempotency_key: str | None = None,
         actor_groups: list[str] | None = None,
         proposal_version: int | None = None,
+        require_proposal_version: bool = False,
         now: datetime | None = None,
     ) -> tuple[HumanDecision, ExecutionResult | None, str | None, bool]:
         """Validate permissions, proposal currency, and reserve an approval/rejection before dispatch."""
@@ -455,6 +456,11 @@ class ApprovalService:
                 f"Proposal '{proposal_id}' not found on case '{case.case_id}'."
             )
 
+        if require_proposal_version and proposal_version is None:
+            raise StaleProposalVersionError(
+                f"Proposal '{proposal_id}' approval requires explicit current proposal_version "
+                f"(current={proposal.version})."
+            )
         if proposal_version is not None and proposal.version != proposal_version:
             raise StaleProposalVersionError(
                 f"Proposal '{proposal_id}' version mismatch: expected {proposal.version}, got {proposal_version}."
@@ -637,6 +643,7 @@ class ApprovalService:
         idempotency_key: str | None = None,
         actor_groups: list[str] | None = None,
         proposal_version: int | None = None,
+        require_proposal_version: bool = False,
         now: datetime | None = None,
     ) -> tuple[HumanDecision, ExecutionResult, bool]:
         """Apply an authenticated approve/reject decision idempotently in assisted mode."""
@@ -649,6 +656,7 @@ class ApprovalService:
             idempotency_key=idempotency_key,
             actor_groups=actor_groups,
             proposal_version=proposal_version,
+            require_proposal_version=require_proposal_version,
             now=now,
         )
         if was_duplicate:

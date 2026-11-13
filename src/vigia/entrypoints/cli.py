@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from vigia.adapters.inbound.http_api import VigiaHttpApp, serve_http
+from vigia.application.cohort_comparison import infer_error_definition
 from vigia.demo import copy_demo_scenario
 from vigia.domain.contracts import (
     Alert,
@@ -29,18 +30,33 @@ from vigia.runtime import PilotRuntimeConfig, build_pilot_case_service
 
 
 class _OfflineDemoChatModel(BaseChatModel):
-    """Deterministic scripted chat model used only with --demo-offline."""
+    """Deterministic scripted chat model supporting initial investigation and read-only follow-up."""
 
-    step: int = 0
     deployed_sha: str = ""
     base_sha: str = ""
+    bound_tool_names: list[str] = []
 
     @property
     def _llm_type(self) -> str:
         return "vigia-offline-demo"
 
-    def bind_tools(self, tools: Any, **kwargs: Any) -> _OfflineDemoChatModel:
-        return self
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_OfflineDemoChatModel":
+        names = [
+            getattr(t, "name", None) or (t.get("name", "") if isinstance(t, dict) else "")
+            for t in tools
+        ]
+        return self.model_copy(update={"bound_tool_names": [n for n in names if n]})
+
+    def _latest_tool_payload(self, messages: list[BaseMessage]) -> dict[str, Any]:
+        for msg in reversed(messages):
+            if getattr(msg, "type", "") == "tool":
+                try:
+                    parsed = json.loads(str(msg.content))
+                    if isinstance(parsed, dict):
+                        return parsed
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+        return {}
 
     def _generate(
         self,
@@ -49,138 +65,212 @@ class _OfflineDemoChatModel(BaseChatModel):
         run_manager: Any = None,
         **kwargs: Any,
     ) -> ChatResult:
-        plan = [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call_1",
-                        "name": "detect_anomaly",
-                        "args": {"service": "transferencias", "metric": "latency_p95_ms"},
-                    },
-                    {
-                        "id": "call_2",
-                        "name": "query_dependencies",
-                        "args": {"service": "transferencias", "direction": "outbound"},
-                    },
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call_3",
-                        "name": "resolve_release",
-                        "args": {"service": "pagos-core", "environment": "production"},
-                    }
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call_4",
-                        "name": "compare_revisions",
-                        "args": {
-                            "repository": "applications/pagos-core",
-                            "base_sha": self.base_sha,
-                            "target_sha": self.deployed_sha,
+        is_follow_up = "propose_action" not in self.bound_tool_names
+        ai_turns = sum(1 for m in messages if getattr(m, "type", "") == "ai")
+
+        if not is_follow_up:
+            initial_plan = [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "detect_anomaly",
+                            "args": {"service": "transferencias", "metric": "latency_p95_ms"},
                         },
-                    },
-                    {
-                        "id": "call_5",
-                        "name": "read_snippet",
-                        "args": {
-                            "repository": "applications/pagos-core",
-                            "sha": self.deployed_sha,
-                            "path": "src/pool.py",
-                            "start_line": 1,
-                            "end_line": 20,
+                        {
+                            "id": "call_2",
+                            "name": "query_dependencies",
+                            "args": {"service": "transferencias", "direction": "outbound"},
                         },
-                    },
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call_6",
-                        "name": "search_logs",
-                        "args": {
-                            "service": "pagos-core",
-                            "pattern": "Connection pool exhausted",
-                            "window_start": "2026-11-12T08:55:00-05:00",
-                            "window_end": "2026-11-12T09:12:00-05:00",
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_3",
+                            "name": "resolve_release",
+                            "args": {"service": "pagos-core", "environment": "production"},
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_4",
+                            "name": "compare_revisions",
+                            "args": {
+                                "repository": "applications/pagos-core",
+                                "base_sha": self.base_sha,
+                                "target_sha": self.deployed_sha,
+                            },
                         },
-                    },
-                    {
-                        "id": "call_7",
-                        "name": "search_similar_incidents",
-                        "args": {
-                            "description": "Connection pool exhausted after pool_size reduction in pagos-core",
-                            "k": 2,
+                        {
+                            "id": "call_5",
+                            "name": "read_snippet",
+                            "args": {
+                                "repository": "applications/pagos-core",
+                                "sha": self.deployed_sha,
+                                "path": "src/pool.py",
+                                "start_line": 1,
+                                "end_line": 20,
+                            },
                         },
-                    },
-                    {
-                        "id": "call_8",
-                        "name": "search_runbook",
-                        "args": {"query": "Connection pool exhausted rollback"},
-                    },
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call_9",
-                        "name": "propose_action",
-                        "args": {
-                            "action": "rollback_change",
-                            "target_service": "pagos-core",
-                            "target_release_id": "CHG-4821",
-                            "hypothesis": (
-                                "CHG-4821 reduced DB pool_size from 80 to 50 in pagos-core "
-                                "(src/pool.py#L4-L8), causing pool exhaustion upstream in transferencias."
-                            ),
-                            "justification": (
-                                "312 Connection pool exhausted errors started at 09:01 exclusively in cohort CHG-4821; "
-                                "matches INC-3512, INC-3307 and RB-087."
-                            ),
-                            "evidence_ids": [
-                                "EV-001",
-                                "EV-002",
-                                "EV-003",
-                                "EV-004",
-                                "EV-005",
-                                "EV-006",
-                                "EV-007",
-                                "EV-008",
-                                "EV-009",
-                                "EV-010",
-                            ],
-                            "verification_plan": (
-                                "Query transferencias latency_p95_ms 7-10 min post-rollback; "
-                                "expect recovery below 800 ms toward 180 ms baseline."
-                            ),
-                            "exposed_services": ["transferencias", "pagos-core"],
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_6",
+                            "name": "search_logs",
+                            "args": {
+                                "service": "pagos-core",
+                                "pattern": "Connection pool exhausted",
+                                "window_start": "2026-11-12T08:55:00-05:00",
+                                "window_end": "2026-11-12T09:12:00-05:00",
+                            },
                         },
-                    }
-                ],
-            ),
-            AIMessage(
-                content=(
-                    "**Symptom & Projected Impact**: Transferencias p95 latency rose from 180 ms to 420 ms "
-                    "(~24 min to 800 ms threshold) [EV-001].\n"
-                    "**Probable Cause & Dependency Path**: Transferencias calls pagos-core [EV-002]; "
-                    f"active release CHG-4821 ({self.deployed_sha[:8]}) reduced `pool_size` 80 -> 50 in "
-                    "`src/pool.py` [EV-003, EV-004, EV-005], producing 312 pool exhaustion errors since 09:01 [EV-006].\n"
-                    "**Proposed Action**: Rollback `CHG-4821` on `pagos-core`."
+                        {
+                            "id": "call_7",
+                            "name": "search_similar_incidents",
+                            "args": {
+                                "description": "Connection pool exhausted after pool_size reduction in pagos-core",
+                                "k": 2,
+                            },
+                        },
+                        {
+                            "id": "call_8",
+                            "name": "search_runbook",
+                            "args": {"query": "Connection pool exhausted rollback"},
+                        },
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_9",
+                            "name": "propose_action",
+                            "args": {
+                                "action": "rollback_change",
+                                "target_service": "pagos-core",
+                                "target_release_id": "CHG-4821",
+                                "hypothesis": (
+                                    "CHG-4821 reduced DB pool_size from 80 to 50 in pagos-core "
+                                    "(src/pool.py#L4-L8), causing pool exhaustion upstream in transferencias."
+                                ),
+                                "justification": (
+                                    "312 Connection pool exhausted errors started at 09:01 exclusively in cohort CHG-4821; "
+                                    "matches INC-3512, INC-3307 and RB-087."
+                                ),
+                                "evidence_ids": [
+                                    "EV-001",
+                                    "EV-002",
+                                    "EV-003",
+                                    "EV-004",
+                                    "EV-005",
+                                    "EV-006",
+                                    "EV-007",
+                                    "EV-008",
+                                    "EV-009",
+                                    "EV-010",
+                                ],
+                                "verification_plan": (
+                                    "Query transferencias latency_p95_ms 7-10 min post-rollback; "
+                                    "expect recovery below 800 ms toward 180 ms baseline."
+                                ),
+                                "exposed_services": ["transferencias", "pagos-core"],
+                            },
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content=(
+                        "**Symptom & Projected Impact**: Transferencias p95 latency rose from 180 ms to 420 ms "
+                        "(~24 min to 800 ms threshold) [EV-001].\n"
+                        "**Probable Cause & Dependency Path**: Transferencias calls pagos-core [EV-002]; "
+                        f"active release CHG-4821 ({self.deployed_sha[:8]}) reduced `pool_size` 80 -> 50 in "
+                        "`src/pool.py` [EV-003, EV-004, EV-005], producing 312 pool exhaustion errors since 09:01 [EV-006].\n"
+                        "**Proposed Action**: Rollback `CHG-4821` on `pagos-core`."
+                    )
+                ),
+            ]
+            idx = min(ai_turns, len(initial_plan) - 1)
+            return ChatResult(generations=[ChatGeneration(message=initial_plan[idx])])
+
+        user_msg = ""
+        for msg in messages:
+            if getattr(msg, "type", "") == "human":
+                user_msg = str(msg.content)
+                break
+        lowered = user_msg.lower()
+        asks_current_status = any(
+            k in lowered for k in ("ahora", "currently", "right now", "still", "actualmente", "sigue")
+        ) and not any(k in lowered for k in ("tráfico", "trafico", "traffic", "cohor", "tasa", "rate", "carga"))
+
+        if ai_turns == 0:
+            if asks_current_status:
+                return ChatResult(
+                    generations=[
+                        ChatGeneration(
+                            message=AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "id": "fu_metric_1",
+                                        "name": "query_metrics",
+                                        "args": {
+                                            "service": "transferencias",
+                                            "metric": "latency_p95_ms",
+                                            "window_minutes": 15,
+                                        },
+                                    }
+                                ],
+                            )
+                        )
+                    ]
                 )
-            ),
-        ]
-        idx = min(self.step, len(plan) - 1)
-        self.step += 1
-        return ChatResult(generations=[ChatGeneration(message=plan[idx])])
+            pattern = infer_error_definition(user_msg)
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "id": "fu_cohort_1",
+                                    "name": "compare_cohort_error_rates",
+                                    "args": {
+                                        "service": "pagos-core",
+                                        "pattern": pattern,
+                                        "check_shared_saturation": True,
+                                    },
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+
+        payload = self._latest_tool_payload(messages)
+        ev_ids = payload.get("evidence_ids") or []
+        cite_str = ", ".join(str(eid) for eid in ev_ids)
+        if asks_current_status:
+            cur = payload.get("current_value")
+            text = (
+                f"Estado actualizado de `transferencias` (`latency_p95_ms`): {cur} ms [{cite_str}]."
+                if cite_str
+                else f"Consulta de estado ejecutada para `transferencias` (`latency_p95_ms`): {cur}."
+            )
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
+
+        comp = payload.get("comparison") if isinstance(payload.get("comparison"), dict) else {}
+        summary = comp.get("summary") or payload.get("note") or "Comparación por cohorte completada."
+        text = f"{summary} [{cite_str}]." if cite_str else str(summary)
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
 
 
 def _bootstrap_demo_workspace(temp_root: Path) -> tuple[Path, dict[str, Path], str, str]:
@@ -345,6 +435,10 @@ def main(argv: list[str] | None = None) -> int:
                 app = VigiaHttpApp(
                     service,
                     webhook_token=os.environ.get("VIGIA_WEBHOOK_TOKEN"),
+                    require_user_auth=(profile == RuntimeProfile.PILOT),
+                    session_secret=os.environ.get("VIGIA_SESSION_SECRET"),
+                    trusted_proxy_token=os.environ.get("VIGIA_TRUSTED_PROXY_TOKEN"),
+                    allow_demo_console_session=(profile == RuntimeProfile.DEMO),
                     auto_process_alerts=True,
                 )
                 print(f"Serving Vigía Pilot API & Console at http://{args.host}:{args.port} (mode={mode.value})")

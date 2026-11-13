@@ -19,6 +19,7 @@ from vigia.domain.contracts import (
     Alert,
     CaseStatus,
     ComparisonVerdict,
+    ConnectorStatus,
     ConversationIntent,
     DecisionChoice,
     OperationalMode,
@@ -370,7 +371,7 @@ def test_turn_types_explanation_chat_approval_ambiguous_now_idempotency_and_sse(
     service, sim_state, case, _ = _open_initial_case(transfers_workspace)
     try:
         app = VigiaHttpApp(service, require_user_auth=True, auto_process_alerts=False)
-        hdrs = {"X-Vigia-User": "alice", "X-Vigia-Groups": "transfers-squad"}
+        hdrs = {"Authorization": f"Bearer {app.issue_session_token('alice', ['transfers-squad'])}"}
 
         # 1. Ambiguous "¿Y ahora?" with no prior metric/service turn asks clarifying question, 0 revisions.
         ambig = app.handle_request(
@@ -615,8 +616,12 @@ def test_e2e_concurrent_reevaluation_approval_race_historical_explain_and_worker
         transfers_workspace, mode=OperationalMode.ASSISTED, db_name="race.db"
     )
     app = VigiaHttpApp(svc, require_user_auth=True, auto_process_alerts=False)
-    chat_hdrs = {"X-Vigia-User": "session-1", "X-Vigia-Groups": "transfers-squad"}
-    approver_hdrs = {"X-Vigia-User": "session-2", "X-Vigia-Groups": "oncall-approvers"}
+    chat_hdrs = {
+        "Authorization": f"Bearer {app.issue_session_token('session-1', ['transfers-squad'])}"
+    }
+    approver_hdrs = {
+        "Authorization": f"Bearer {app.issue_session_token('session-2', ['oncall-approvers'])}"
+    }
 
     try:
         assert case.proposal is not None
@@ -673,6 +678,12 @@ def test_e2e_concurrent_reevaluation_approval_race_historical_explain_and_worker
         )
         try:
             restarted_app = VigiaHttpApp(restarted_svc, require_user_auth=True, auto_process_alerts=False)
+            chat_hdrs = {
+                "Authorization": f"Bearer {restarted_app.issue_session_token('session-1', ['transfers-squad'])}"
+            }
+            approver_hdrs = {
+                "Authorization": f"Bearer {restarted_app.issue_session_token('session-2', ['oncall-approvers'])}"
+            }
             # Duplicate replay after restart produces no extra turn/work; processing finishes once.
             dup_after_restart = restarted_app.handle_request(
                 "POST",
@@ -836,3 +847,401 @@ def test_approval_wins_race_over_delayed_follow_up_and_legacy_case_backfill(
         assert reloaded.proposal_history[0].proposal_id == case.proposal.proposal_id
     finally:
         svc.close()
+
+
+def test_offline_demo_model_web_flow_and_mandatory_proposal_version(
+    transfers_workspace: TransfersWorkspace,
+) -> None:
+    from vigia.entrypoints.cli import _OfflineDemoChatModel
+
+    _write_two_release_manifest(transfers_workspace)
+    _write_logs_for_variant(transfers_workspace, "causal_change")
+    model = _OfflineDemoChatModel(
+        base_sha=transfers_workspace.base_sha,
+        deployed_sha=transfers_workspace.deployed_sha,
+    )
+    cfg = PilotRuntimeConfig(
+        profile=RuntimeProfile.PILOT,
+        mode=OperationalMode.ASSISTED,
+        fixtures_dir=transfers_workspace.fixtures_dir,
+        authorized_repos={"applications/pagos-core": transfers_workspace.repo_dir},
+        db_path=transfers_workspace.root / "offline_causal.db",
+    )
+    svc, sim_state, _ = build_pilot_case_service(cfg, model=model)
+    try:
+        app = VigiaHttpApp(svc, require_user_auth=True, auto_process_alerts=True)
+        chat_hdrs = {
+            "Authorization": f"Bearer {app.issue_session_token('lead', ['transfers-squad', 'oncall-approvers'])}"
+        }
+        alert_resp = app.handle_request(
+            "POST",
+            "/api/alerta",
+            body=json.dumps(
+                {
+                    "source": "grafana",
+                    "event_id": "offline-e2e-1",
+                    "state": "firing",
+                    "alert": {
+                        "service": "Transferencias",
+                        "environment": "production",
+                        "metric": "latency_p95_ms",
+                        "observed_at": "2026-11-12T09:12:00-05:00",
+                        "current_value": 420.0,
+                        "threshold_value": 800.0,
+                    },
+                }
+            ),
+        )
+        assert alert_resp.status_code == 202
+        case_id = alert_resp.json()["case_id"]
+        initial_dto = app.handle_request("GET", f"/api/caso?caso={case_id}", headers=chat_hdrs).json()
+        prop_id = initial_dto["proposal"]["proposal_id"]
+        assert initial_dto["proposal"]["version"] == 1
+
+        # Same question via web endpoint triggers _OfflineDemoChatModel follow-up -> maintained (v2).
+        chat_resp = app.handle_request(
+            "POST",
+            f"/api/casos/{case_id}/mensajes",
+            headers=chat_hdrs,
+            body=json.dumps(
+                {
+                    "client_message_id": "off-1",
+                    "text": "¿Y si fue el tráfico?",
+                    "base_revision": 1,
+                    "proposal_id": prop_id,
+                }
+            ),
+        )
+        assert chat_resp.status_code == 202
+        after_dto = app.handle_request("GET", f"/api/caso?caso={case_id}", headers=chat_hdrs).json()
+        assert after_dto["current_conclusion"]["action_outcome"] == "maintained"
+        assert after_dto["proposal"]["version"] == 2
+        assert after_dto["conversation_turns"][-1]["comparison"]["verdict"] == ComparisonVerdict.SUPPORTS_CAUSAL_CHANGE.value
+
+        # Omitting proposal_version OR sending stale v1 produces zero executor dispatches.
+        no_ver = app.handle_request(
+            "POST",
+            "/api/aprobacion",
+            headers=chat_hdrs,
+            body=json.dumps(
+                {
+                    "case_id": case_id,
+                    "proposal_id": prop_id,
+                    "decision": "approve",
+                }
+            ),
+        )
+        assert no_ver.status_code == 400
+        assert len(sim_state.operations) == 0
+
+        stale_ver = app.handle_request(
+            "POST",
+            "/api/aprobacion",
+            headers=chat_hdrs,
+            body=json.dumps(
+                {
+                    "case_id": case_id,
+                    "proposal_id": prop_id,
+                    "proposal_version": 1,
+                    "decision": "approve",
+                }
+            ),
+        )
+        assert stale_ver.status_code == 409
+        assert len(sim_state.operations) == 0
+
+        # Approving with explicit current v2 executes cleanly.
+        ok_ver = app.handle_request(
+            "POST",
+            "/api/aprobacion",
+            headers=chat_hdrs,
+            body=json.dumps(
+                {
+                    "case_id": case_id,
+                    "proposal_id": prop_id,
+                    "proposal_version": 2,
+                    "decision": "approve",
+                }
+            ),
+        )
+        assert ok_ver.status_code == 200
+        assert len(sim_state.operations) == 1
+    finally:
+        svc.close()
+
+    # Variant 2: shared traffic withdraws rollback using the exact same _OfflineDemoChatModel.
+    _write_logs_for_variant(transfers_workspace, "shared_load")
+    model_shared = _OfflineDemoChatModel(
+        base_sha=transfers_workspace.base_sha,
+        deployed_sha=transfers_workspace.deployed_sha,
+    )
+    cfg2 = PilotRuntimeConfig(
+        profile=RuntimeProfile.PILOT,
+        mode=OperationalMode.ASSISTED,
+        fixtures_dir=transfers_workspace.fixtures_dir,
+        authorized_repos={"applications/pagos-core": transfers_workspace.repo_dir},
+        db_path=transfers_workspace.root / "offline_shared.db",
+    )
+    svc2, _, _ = build_pilot_case_service(cfg2, model=model_shared)
+    try:
+        app2 = VigiaHttpApp(svc2, require_user_auth=True, auto_process_alerts=True)
+        hdrs2 = {"Authorization": f"Bearer {app2.issue_session_token('lead', ['transfers-squad'])}"}
+        res2 = app2.handle_request(
+            "POST",
+            "/api/alerta",
+            body=json.dumps(
+                {
+                    "source": "grafana",
+                    "event_id": "offline-e2e-2",
+                    "state": "firing",
+                    "alert": {
+                        "service": "Transferencias",
+                        "environment": "production",
+                        "metric": "latency_p95_ms",
+                        "observed_at": "2026-11-12T09:12:00-05:00",
+                        "current_value": 420.0,
+                        "threshold_value": 800.0,
+                    },
+                }
+            ),
+        )
+        cid2 = res2.json()["case_id"]
+        app2.handle_request(
+            "POST",
+            f"/api/casos/{cid2}/mensajes",
+            headers=hdrs2,
+            body=json.dumps(
+                {
+                    "client_message_id": "off-2",
+                    "text": "¿Y si fue el tráfico?",
+                    "base_revision": 1,
+                }
+            ),
+        )
+        dto2 = app2.handle_request("GET", f"/api/caso?caso={cid2}", headers=hdrs2).json()
+        assert dto2["current_conclusion"]["action_outcome"] == "withdrawn"
+        assert dto2["proposal"] is None
+    finally:
+        svc2.close()
+
+
+def test_prometheus_missing_counters_stays_unknown_and_inconclusive_comparison_allows_retry(
+    transfers_workspace: TransfersWorkspace,
+) -> None:
+    from vigia.adapters.outbound.github import GitHubReleaseSourceAdapter
+    from vigia.adapters.outbound.http_telemetry import PrometheusLokiTelemetryAdapter
+    from vigia.adapters.outbound.service_catalog import YamlServiceCatalogAdapter
+
+    catalog = YamlServiceCatalogAdapter.from_yaml(transfers_workspace.fixtures_dir / "services.yaml")
+
+    def prom_single_sample(
+        url: str, params: dict[str, str], headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        if "latency_p95_ms" in params.get("query", ""):
+            return 200, {
+                "data": {
+                    "result": [
+                        {
+                            "metric": {"cohort": "v1"},
+                            "values": [["2026-11-12T09:19:00-05:00", "184.0"]],
+                        }
+                    ]
+                }
+            }
+        # Companion counter series absent -> must stay unknown, never synthetic 100/0.
+        return 200, {"data": {"result": []}}
+
+    prom = PrometheusLokiTelemetryAdapter(catalog, http_get=prom_single_sample)
+    series = prom.query_metrics(
+        "transferencias",
+        "production",
+        "latency_p95_ms",
+        10,
+        datetime.fromisoformat("2026-11-12T09:19:00-05:00"),
+    )
+    assert series.request_volume is None
+    assert series.error_total is None
+    assert series.coverage < 0.2
+
+    # GitHub Deployments without inline 'status' and without statuses -> pending (never assumed active).
+    def gh_missing_status(
+        url: str, params: dict[str, str], headers: dict[str, str]
+    ) -> tuple[int, Any]:
+        if url.endswith("/deployments"):
+            return 200, [
+                {
+                    "id": 77,
+                    "environment": "production",
+                    "created_at": "2026-11-12T13:55:00Z",
+                    "sha": transfers_workspace.deployed_sha,
+                    "statuses_url": "https://api.github.com/repos/b/p/deployments/77/statuses",
+                }
+            ]
+        return 200, []
+
+    gh = GitHubReleaseSourceAdapter({"pagos-core": "b/p"}, http_get=gh_missing_status)
+    gh_res = gh.resolve_active_releases(
+        "pagos-core", "production", datetime.fromisoformat("2026-11-12T09:12:00-05:00")
+    )
+    assert gh_res.status == ConnectorStatus.NO_RESULTS
+
+    # Reusable comparison check: indeterminate comparison must NOT block retry once denominator arrives,
+    # and a different error pattern must NOT reuse an unrelated '*' comparison.
+    _write_two_release_manifest(transfers_workspace)
+    _write_logs_for_variant(transfers_workspace, "missing_denominator")
+    svc, _, case, _ = _open_initial_case(transfers_workspace, db_name="retry_inc.db")
+    try:
+        app = VigiaHttpApp(svc, require_user_auth=True, auto_process_alerts=True)
+        hdrs = {"Authorization": f"Bearer {app.issue_session_token('alice', ['transfers-squad'])}"}
+
+        first = app.handle_request(
+            "POST",
+            f"/api/casos/{case.case_id}/mensajes",
+            headers=hdrs,
+            body=json.dumps(
+                {
+                    "client_message_id": "inc-1",
+                    "text": "¿Y si fue el tráfico?",
+                    "base_revision": 1,
+                }
+            ),
+        )
+        assert first.status_code == 202
+        c_mid = svc.get_case(case.case_id)
+        assert c_mid.proposal is not None and c_mid.proposal.status == ProposalStatus.UNDER_REVIEW
+
+        # Now recover denominator logs and ask again on the SAME cutoff!
+        _write_logs_for_variant(transfers_workspace, "causal_change")
+        second = app.handle_request(
+            "POST",
+            f"/api/casos/{case.case_id}/mensajes",
+            headers=hdrs,
+            body=json.dumps(
+                {
+                    "client_message_id": "inc-2",
+                    "text": "¿Y si fue el tráfico ahora con las cohortes completas?",
+                    "base_revision": len(c_mid.revisions),
+                }
+            ),
+        )
+        assert second.status_code == 202
+        c_done = svc.get_case(case.case_id)
+        assert c_done.proposal is not None and c_done.proposal.status == ProposalStatus.PENDING
+
+        # Distinct error definition ('timeout') must trigger a fresh comparison rather than reusing '*'.
+        diff_pattern = app.handle_request(
+            "POST",
+            f"/api/casos/{case.case_id}/mensajes",
+            headers=hdrs,
+            body=json.dumps(
+                {
+                    "client_message_id": "inc-3",
+                    "text": "Compara cohortes para 'timeout'",
+                    "base_revision": len(c_done.revisions),
+                }
+            ),
+        )
+        assert diff_pattern.status_code == 202
+        assert len(svc.get_case(case.case_id).revisions) == len(c_done.revisions) + 1
+    finally:
+        svc.close()
+
+
+def test_http_auth_security_xss_and_concurrent_worker_leases(
+    transfers_workspace: TransfersWorkspace,
+) -> None:
+    _write_two_release_manifest(transfers_workspace)
+    _write_logs_for_variant(transfers_workspace, "causal_change")
+    cfg = PilotRuntimeConfig(
+        profile=RuntimeProfile.PILOT,
+        mode=OperationalMode.ASSISTED,
+        fixtures_dir=transfers_workspace.fixtures_dir,
+        authorized_repos={"applications/pagos-core": transfers_workspace.repo_dir},
+        db_path=transfers_workspace.root / "leases.db",
+    )
+    w1, sim1, _ = build_pilot_case_service(
+        cfg,
+        model=DualPhaseConversationalModel(
+            base_sha=transfers_workspace.base_sha,
+            deployed_sha=transfers_workspace.deployed_sha,
+        ),
+    )
+    w2, _, _ = build_pilot_case_service(
+        cfg,
+        model=DualPhaseConversationalModel(
+            base_sha=transfers_workspace.base_sha,
+            deployed_sha=transfers_workspace.deployed_sha,
+        ),
+    )
+    try:
+        app = VigiaHttpApp(
+            w1,
+            require_user_auth=True,
+            trusted_proxy_token="proxy-secret-xyz",
+            auto_process_alerts=False,
+        )
+        # Ingest creates pending work item; active lease held by w1 blocks w2 from claiming it.
+        ingest_resp = app.handle_request(
+            "POST",
+            "/api/alerta",
+            body=json.dumps(
+                {
+                    "source": "grafana",
+                    "event_id": "lease-1",
+                    "state": "firing",
+                    "alert": {
+                        "service": "Transferencias",
+                        "environment": "production",
+                        "metric": "latency_p95_ms",
+                        "observed_at": "2026-11-12T09:12:00-05:00",
+                        "current_value": 420.0,
+                        "threshold_value": 800.0,
+                    },
+                }
+            ),
+        )
+        assert ingest_resp.status_code == 202
+        cid = ingest_resp.json()["case_id"]
+
+        work_item = w1._store.claim_next_work(case_id=cid, worker_id="worker-1", lease_seconds=120)
+        assert work_item is not None
+        assert w2.process_pending_work(cid) is None  # Blocked while lease is active!
+
+        # Spoofed client headers without proxy secret or signed bearer token must fail with 401.
+        spoof_chat = app.handle_request(
+            "POST",
+            f"/api/casos/{cid}/mensajes",
+            headers={"X-Vigia-User": "attacker", "X-Vigia-Groups": "admin,oncall-approvers"},
+            body=json.dumps({"client_message_id": "x-1", "text": "¿Por qué?"}),
+        )
+        assert spoof_chat.status_code == 401
+
+        # Authenticated proxy header passes and verifies XSS-free console HTML (no innerHTML / inline auth headers).
+        proxy_hdrs = {
+            "X-Vigia-Proxy-Auth": "proxy-secret-xyz",
+            "X-Vigia-User": "alice",
+            "X-Vigia-Groups": "transfers-squad",
+        }
+        w1._store.complete_work(work_item.work_id, status="pending")
+        w2.process_pending_work(cid)
+        xss_chat = app.handle_request(
+            "POST",
+            f"/api/casos/{cid}/mensajes",
+            headers=proxy_hdrs,
+            body=json.dumps(
+                {
+                    "client_message_id": "xss-1",
+                    "text": "¿Por qué <img src=x onerror=alert(1)>?",
+                    "base_revision": 1,
+                }
+            ),
+        )
+        assert xss_chat.status_code == 202
+        html = app.handle_request("GET", "/").body
+        assert "innerHTML" not in html
+        assert "X-Vigia-User" not in html
+        assert "textContent" in html
+        assert len(sim1.operations) == 0
+    finally:
+        w1.close()
+        w2.close()
